@@ -9,6 +9,7 @@ interface Props {
   contract: ContractSettings | null;
   restDaysCount: number;
   view: "day" | "week" | "month";
+  holidayCredit?: { hours: number; count: number };
 }
 
 function weeksInMonth(reference: Date): number {
@@ -25,8 +26,12 @@ export function StatsCards({
   contract,
   restDaysCount,
   view,
+  holidayCredit,
 }: Props) {
-  const total = weekTotalHours(activities);
+  const worked = weekTotalHours(activities);
+  const holidayHours = holidayCredit?.hours ?? 0;
+  const holidayCount = holidayCredit?.count ?? 0;
+  const total = worked + holidayHours;
   const weeklyTarget = contract?.weekly_hours ?? 35;
   const dailyTarget = contract?.daily_max_hours ?? 10;
 
@@ -57,12 +62,17 @@ export function StatsCards({
   const pct =
     target > 0 ? Math.min(100, Math.round((total / target) * 100)) : 0;
 
+  const holidayHint =
+    holidayHours > 0
+      ? ` · dont ${formatHours(holidayHours)} férié${holidayCount > 1 ? "s" : ""}`
+      : "";
+
   const cards = [
     {
       icon: Clock,
       label: hoursLabel,
       value: formatHours(total),
-      hint: `Objectif ${formatHours(target)}`,
+      hint: `Objectif ${formatHours(target)}${holidayHint}`,
       progress: pct,
     },
     {

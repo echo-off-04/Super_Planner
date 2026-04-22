@@ -8,20 +8,13 @@ import {
   formatHours,
   formatTime,
   groupActivitiesByDay,
-  activityWorkHours,
+  dailyRecuperationHours,
+  dailyUsedHours,
+  dailyWorkHours,
 } from "@/lib/time";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import {
-  Plus,
-  MapPin,
-  Coffee,
-  Truck,
-  GraduationCap,
-  Briefcase,
-  MoveHorizontal as MoreHorizontal,
-  TriangleAlert,
-} from "lucide-react";
+import { Plus, MapPin, Coffee, Truck, GraduationCap, Briefcase, MoveHorizontal as MoreHorizontal, TriangleAlert, Star, TreePalm as Palmtree } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 interface Props {
@@ -29,47 +22,43 @@ interface Props {
   activities: Activity[];
   restDays: RestDay[];
   contract: ContractSettings | null;
+  holidays?: Map<string, string>;
+  vacations?: Map<string, string>;
   onAddActivity: (date: Date) => void;
   onEditActivity: (activity: Activity) => void;
   onToggleRest: (date: Date) => void;
 }
 
+const WORK_CLS =
+  "bg-blue-500/15 text-foreground border-blue-500/40 dark:bg-blue-400/15 dark:border-blue-400/40";
+const PAUSE_CLS =
+  "bg-green-500/15 text-foreground border-green-500/40 dark:bg-green-400/15 dark:border-green-400/40";
+
 const typeMeta: Record<
   string,
   { label: string; icon: typeof Briefcase; cls: string }
 > = {
-  prestation: {
-    label: "Prestation",
-    icon: Briefcase,
-    cls: "bg-chart-1/15 text-foreground border-chart-1/30",
-  },
-  deplacement: {
-    label: "Déplacement",
-    icon: Truck,
-    cls: "bg-chart-2/15 text-foreground border-chart-2/30",
-  },
-  formation: {
-    label: "Formation",
-    icon: GraduationCap,
-    cls: "bg-chart-4/15 text-foreground border-chart-4/30",
-  },
-  pause: {
-    label: "Pause",
-    icon: Coffee,
-    cls: "bg-muted text-muted-foreground border-border",
-  },
-  autre: {
-    label: "Autre",
-    icon: MoreHorizontal,
-    cls: "bg-chart-5/15 text-foreground border-chart-5/30",
-  },
+  prestation: { label: "Prestation", icon: Briefcase, cls: WORK_CLS },
+  deplacement: { label: "Déplacement", icon: Truck, cls: WORK_CLS },
+  formation: { label: "Formation", icon: GraduationCap, cls: WORK_CLS },
+  pause: { label: "Pause", icon: Coffee, cls: PAUSE_CLS },
+  autre: { label: "Autre", icon: MoreHorizontal, cls: WORK_CLS },
 };
+
+function metaFor(type: string) {
+  if (type === "pause") return typeMeta.pause;
+  if (type === "recuperation")
+    return { label: "Récupération", icon: Coffee, cls: PAUSE_CLS };
+  return typeMeta[type] ?? { ...typeMeta.autre, label: type };
+}
 
 export function WeekView({
   weekStart,
   activities,
   restDays,
   contract,
+  holidays,
+  vacations,
   onAddActivity,
   onEditActivity,
   onToggleRest,
@@ -112,15 +101,17 @@ export function WeekView({
           date.getDate() === today.getDate() &&
           date.getMonth() === today.getMonth() &&
           date.getFullYear() === today.getFullYear();
-        const dayHours = dayActivities.reduce(
-          (s, a) => s + activityWorkHours(a),
-          0
-        );
+        const dayHours = dailyWorkHours(dayActivities);
+        const recupHours = dailyRecuperationHours(dayActivities);
+        const usedHours = dailyUsedHours(dayActivities);
 
-        const overload = dayHours > maxDaily;
+        const overload = usedHours > maxDaily;
         const prevDay = i === 0 ? previousDayActivities : grouped[i - 1];
         const gap = dayRestGap(prevDay, dayActivities);
         const insufficientRest = gap !== null && gap < minRest;
+        const holidayName = holidays?.get(iso);
+        const vacationLabel = vacations?.get(iso);
+        const isSick = rest?.kind === "sick";
 
         return (
           <div
@@ -128,11 +119,14 @@ export function WeekView({
             className={cn(
               "flex flex-col rounded-lg border bg-card",
               overload && "border-destructive/60",
+              holidayName && "border-amber-500/50 bg-amber-500/5",
+              vacationLabel && "border-teal-500/50 bg-teal-500/5",
+              isSick && "border-rose-500/50 bg-rose-500/5",
               isToday && "ring-2 ring-ring ring-offset-2 ring-offset-background"
             )}
           >
-            <div className="flex items-start justify-between gap-2 border-b px-2.5 py-2">
-              <div className="flex min-w-0 flex-col">
+            <div className="flex flex-col gap-1.5 border-b px-2.5 py-2">
+              <div className="flex items-baseline gap-1.5">
                 <span className="text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
                   {DAY_SHORT[i]}
                 </span>
@@ -140,13 +134,14 @@ export function WeekView({
                   {date.getDate()}
                 </span>
               </div>
-              <div className="flex flex-col items-end gap-1">
-                {dayHours > 0 && (
+              <div className="flex flex-wrap items-center gap-1">
+                {(dayHours > 0 || recupHours > 0) && (
                   <Badge
                     variant={overload ? "destructive" : "secondary"}
                     className="px-1.5 text-[10px]"
                   >
                     {formatHours(dayHours)}
+                    {recupHours > 0 && ` + ${formatHours(recupHours)}`}
                   </Badge>
                 )}
                 {insufficientRest && (
@@ -164,9 +159,40 @@ export function WeekView({
                     variant={
                       rest.status === "validated" ? "default" : "outline"
                     }
-                    className="px-1.5 text-[10px]"
+                    className={cn(
+                      "px-1.5 text-[10px]",
+                      isSick &&
+                        "border-rose-500/60 bg-rose-500/15 text-rose-900 dark:text-rose-200"
+                    )}
                   >
-                    {rest.status === "validated" ? "Repos" : "Suggéré"}
+                    {rest.status === "validated"
+                      ? (isSick ? "Maladie" : "Repos") +
+                        (rest.rest_period === "morning"
+                          ? " matin"
+                          : rest.rest_period === "afternoon"
+                            ? " ap.-m."
+                            : "")
+                      : "Suggéré"}
+                  </Badge>
+                )}
+                {holidayName && (
+                  <Badge
+                    variant="outline"
+                    className="gap-1 border-amber-500/60 bg-amber-500/10 px-1.5 text-[10px] text-amber-900 dark:text-amber-200"
+                    title={holidayName}
+                  >
+                    <Star className="h-3 w-3" />
+                    Férié
+                  </Badge>
+                )}
+                {vacationLabel && (
+                  <Badge
+                    variant="outline"
+                    className="gap-1 border-teal-500/60 bg-teal-500/10 px-1.5 text-[10px] text-teal-900 dark:text-teal-200"
+                    title={vacationLabel}
+                  >
+                    <Palmtree className="h-3 w-3" />
+                    Vacances
                   </Badge>
                 )}
               </div>
@@ -182,7 +208,7 @@ export function WeekView({
               )}
 
               {dayActivities.map((a) => {
-                const meta = typeMeta[a.activity_type] || typeMeta.autre;
+                const meta = metaFor(a.activity_type);
                 const Icon = meta.icon;
                 return (
                   <button
@@ -229,9 +255,14 @@ export function WeekView({
                 size="sm"
                 className="h-7 w-full justify-center px-2 text-xs"
                 onClick={() => onToggleRest(date)}
+                disabled={isSick}
               >
                 <span className="truncate">
-                  {rest?.status === "validated" ? "Retirer repos" : "Marquer repos"}
+                  {isSick
+                    ? "Maladie (paramètres)"
+                    : rest?.status === "validated"
+                      ? "Retirer repos"
+                      : "Marquer repos"}
                 </span>
               </Button>
             </div>

@@ -86,7 +86,10 @@ export function sameDay(a: Date, b: Date): boolean {
 
 export function activityWorkHours(a: Activity): number {
   if (a.activity_type === "pause") return 0;
-  return hoursBetween(a.start_time, a.end_time);
+  if (a.activity_type === "recuperation") return 0;
+  const raw = hoursBetween(a.start_time, a.end_time);
+  const breakHours = (a.break_minutes ?? 0) / 60;
+  return Math.max(0, raw - breakHours);
 }
 
 export function groupActivitiesByDay(
@@ -113,8 +116,81 @@ export function groupActivitiesByDay(
   return days;
 }
 
+function mergeIntervals(
+  intervals: { start: number; end: number }[]
+): { start: number; end: number }[] {
+  if (intervals.length === 0) return [];
+  const sorted = [...intervals].sort((a, b) => a.start - b.start);
+  const merged: { start: number; end: number }[] = [sorted[0]];
+  for (let i = 1; i < sorted.length; i++) {
+    const last = merged[merged.length - 1];
+    const cur = sorted[i];
+    if (cur.start <= last.end) {
+      last.end = Math.max(last.end, cur.end);
+    } else {
+      merged.push({ ...cur });
+    }
+  }
+  return merged;
+}
+
+export function dailyWorkHours(dayActivities: Activity[]): number {
+  if (dayActivities.length === 0) return 0;
+  const merged = mergeIntervals(
+    dayActivities.map((a) => ({
+      start: new Date(a.start_time).getTime(),
+      end: new Date(a.end_time).getTime(),
+    }))
+  );
+  const rawMs = merged.reduce((s, i) => s + (i.end - i.start), 0);
+  const recupMs = dayActivities
+    .filter((a) => a.activity_type === "recuperation")
+    .reduce(
+      (s, a) =>
+        s +
+        (new Date(a.end_time).getTime() - new Date(a.start_time).getTime()),
+      0
+    );
+  const breakMinutes = dayActivities.reduce(
+    (s, a) => s + (a.break_minutes ?? 0),
+    0
+  );
+  const hours =
+    (rawMs - recupMs) / (1000 * 60 * 60) - breakMinutes / 60;
+  return Math.max(0, hours);
+}
+
+export function dailyRecuperationHours(dayActivities: Activity[]): number {
+  const ms = dayActivities
+    .filter((a) => a.activity_type === "recuperation")
+    .reduce(
+      (s, a) =>
+        s +
+        (new Date(a.end_time).getTime() - new Date(a.start_time).getTime()),
+      0
+    );
+  return ms / (1000 * 60 * 60);
+}
+
+export function dailyUsedHours(dayActivities: Activity[]): number {
+  return dailyWorkHours(dayActivities) + dailyRecuperationHours(dayActivities);
+}
+
+export function totalWorkHours(activities: Activity[]): number {
+  const byDay = new Map<string, Activity[]>();
+  for (const a of activities) {
+    const key = formatDateISO(new Date(a.start_time));
+    const list = byDay.get(key) ?? [];
+    list.push(a);
+    byDay.set(key, list);
+  }
+  let total = 0;
+  for (const list of byDay.values()) total += dailyWorkHours(list);
+  return total;
+}
+
 export function weekTotalHours(activities: Activity[]): number {
-  return activities.reduce((sum, a) => sum + activityWorkHours(a), 0);
+  return totalWorkHours(activities);
 }
 
 export function formatHours(h: number): string {

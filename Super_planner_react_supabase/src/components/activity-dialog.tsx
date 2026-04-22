@@ -1,11 +1,24 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { supabase } from "@/lib/supabase";
 import type {
   Activity,
   ActivityType,
   CustomActivityType,
+  DefaultWeekSettings,
+  DurationKind,
+  RestDay,
 } from "@/lib/supabase";
-import { BUILTIN_ACTIVITY_TYPES } from "@/lib/supabase";
+import {
+  ACTIVITY_TAG_PRESETS,
+  BUILTIN_ACTIVITY_TYPES,
+  buildDurationPresets,
+  pauseOverlapMinutesForRange,
+  restRangesForPeriod,
+  parseHM,
+  overlapMinutes,
+} from "@/lib/supabase";
+import { Badge } from "@/components/ui/badge";
+import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -15,6 +28,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
@@ -26,8 +40,8 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { Plus, Trash2 } from "lucide-react";
-import { formatDayLong } from "@/lib/time";
+import { Plus, Trash2, TriangleAlert } from "lucide-react";
+import { formatDayLong, formatDateISO, sameDay } from "@/lib/time";
 
 interface Props {
   open: boolean;
@@ -36,7 +50,9 @@ interface Props {
   activity: Activity | null;
   defaultDate?: Date;
   fixedDate?: boolean;
-  onSaved: () => void;
+  defaultWeek: DefaultWeekSettings | null;
+  restDays: RestDay[];
+  onSaved: (info?: { savedDate?: Date; savedId?: string }) => void;
 }
 
 const NEW_TYPE_VALUE = "__new__";
@@ -65,14 +81,19 @@ export function ActivityDialog({
   activity,
   defaultDate,
   fixedDate,
+  defaultWeek,
+  restDays,
   onSaved,
 }: Props) {
+  const presets = useMemo(() => buildDurationPresets(defaultWeek), [defaultWeek]);
+
   const [title, setTitle] = useState("");
   const [type, setType] = useState<ActivityType>("prestation");
   const [baseDate, setBaseDate] = useState<Date>(new Date());
   const [dateField, setDateField] = useState("");
-  const [startTime, setStartTime] = useState("09:00");
-  const [endTime, setEndTime] = useState("17:00");
+  const [startTime, setStartTime] = useState(presets.full_day.start);
+  const [endTime, setEndTime] = useState(presets.full_day.end);
+  const [durationKind, setDurationKind] = useState<DurationKind>("full_day");
   const [location, setLocation] = useState("");
   const [notes, setNotes] = useState("");
   const [saving, setSaving] = useState(false);
@@ -105,6 +126,7 @@ export function ActivityDialog({
       );
       setStartTime(toLocalTime(s));
       setEndTime(toLocalTime(e));
+      setDurationKind((activity.duration_kind as DurationKind) || "custom");
       setLocation(activity.location);
       setNotes(activity.notes);
     } else {
@@ -118,33 +140,116 @@ export function ActivityDialog({
           base.getDate()
         )}`
       );
-      setStartTime("09:00");
-      setEndTime("17:00");
+      setStartTime(presets.full_day.start);
+      setEndTime(presets.full_day.end);
+      setDurationKind("full_day");
       setLocation("");
       setNotes("");
     }
     setCreatingType(false);
     setNewTypeLabel("");
-  }, [open, activity, defaultDate]);
+  }, [open, activity, defaultDate, presets]);
+
+  const activeDate = useMemo(() => {
+    if (fixedDate) return baseDate;
+    if (!dateField) return baseDate;
+    const [y, mo, day] = dateField.split("-").map(Number);
+    return new Date(y, (mo ?? 1) - 1, day ?? 1);
+  }, [fixedDate, baseDate, dateField]);
+
+  const restEntry = useMemo(() => {
+    const iso = formatDateISO(activeDate);
+    return restDays.find((r) => r.rest_date === iso && r.status !== "rejected") || null;
+  }, [restDays, activeDate]);
+
+  const restRanges = useMemo(() => {
+    if (!restEntry) return [];
+    return restRangesForPeriod(restEntry.rest_period, defaultWeek);
+  }, [restEntry, defaultWeek]);
+
+  const availableKinds = useMemo<Array<Exclude<DurationKind, "custom">>>(() => {
+    if (!restEntry) return ["full_day", "morning", "afternoon"];
+    if (restEntry.rest_period === "morning") return ["afternoon"];
+    if (restEntry.rest_period === "afternoon") return ["morning"];
+    return [];
+  }, [restEntry]);
 
   function buildDateTime(timeStr: string): Date {
     const [h, m] = timeStr.split(":").map(Number);
-    let d: Date;
-    if (fixedDate) {
-      d = new Date(baseDate);
-    } else {
-      const [y, mo, day] = dateField.split("-").map(Number);
-      d = new Date(y, (mo ?? 1) - 1, day ?? 1);
-    }
+    const d = new Date(activeDate);
     d.setHours(h ?? 0, m ?? 0, 0, 0);
     return d;
   }
 
+  const startMin = parseHM(startTime);
+  const endMin = parseHM(endTime);
+
+  const isPauseType = type === "pause";
+
+  const availableHalf = useMemo(() => {
+    if (!restEntry || restEntry.rest_period === "full_day") return null;
+    const w = defaultWeek;
+    if (!w) return null;
+    if (restEntry.rest_period === "morning") {
+      return {
+        startMin: parseHM(w.afternoon_start),
+        endMin: parseHM(w.afternoon_end),
+        label: "après-midi",
+      };
+    }
+    return {
+      startMin: parseHM(w.morning_start),
+      endMin: parseHM(w.morning_end),
+      label: "matin",
+    };
+  }, [restEntry, defaultWeek]);
+
+  const restConflict = useMemo(() => {
+    if (!restEntry || isPauseType) return null;
+    if (endMin <= startMin) return null;
+    for (const r of restRanges) {
+      const ov = overlapMinutes(startMin, endMin, r.startMin, r.endMin);
+      if (ov > 0) return r;
+    }
+    if (availableHalf) {
+      if (startMin < availableHalf.startMin || endMin > availableHalf.endMin) {
+        return {
+          startMin: availableHalf.startMin,
+          endMin: availableHalf.endMin,
+          label: `${availableHalf.label} uniquement`,
+        };
+      }
+    }
+    return null;
+  }, [restEntry, restRanges, startMin, endMin, isPauseType, availableHalf]);
+
+  const pauseConflict = useMemo(() => {
+    if (isPauseType) return 0;
+    if (endMin <= startMin) return 0;
+    const w = defaultWeek;
+    if (!w) return 0;
+    const pStart = parseHM(w.pause_start);
+    const pEnd = parseHM(w.pause_end);
+    if (pEnd <= pStart) return 0;
+    return overlapMinutes(startMin, endMin, pStart, pEnd);
+  }, [defaultWeek, startMin, endMin, isPauseType]);
+
+  const canSave =
+    !!title &&
+    endMin > startMin &&
+    !restConflict &&
+    (!restEntry || restEntry.rest_period !== "full_day" || isPauseType);
+
   async function handleSave() {
-    if (!title || !startTime || !endTime) return;
+    if (!canSave) return;
     setSaving(true);
     const startDt = buildDateTime(startTime);
     const endDt = buildDateTime(endTime);
+    const breakMinutes = pauseOverlapMinutesForRange(
+      startDt.toISOString(),
+      endDt.toISOString(),
+      defaultWeek
+    );
     const payload = {
       user_id: userId,
       title,
@@ -154,14 +259,22 @@ export function ActivityDialog({
       location,
       notes,
       source: activity?.source || "manual",
+      duration_kind: durationKind,
+      break_minutes: breakMinutes,
     };
+    let savedId: string | undefined = activity?.id;
     if (activity) {
       await supabase.from("activities").update(payload).eq("id", activity.id);
     } else {
-      await supabase.from("activities").insert(payload);
+      const { data } = await supabase
+        .from("activities")
+        .insert(payload)
+        .select()
+        .maybeSingle();
+      savedId = (data as { id?: string } | null)?.id;
     }
     setSaving(false);
-    onSaved();
+    onSaved({ savedDate: startDt, savedId });
     onOpenChange(false);
   }
 
@@ -205,6 +318,10 @@ export function ActivityDialog({
     ...customTypes.map((t) => ({ value: t.value, label: t.label })),
   ];
 
+  const hasHalfRest = restEntry && restEntry.rest_period !== "full_day";
+  const blockedByFullRest =
+    restEntry && restEntry.rest_period === "full_day" && !isPauseType;
+
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="sm:max-w-lg">
@@ -213,11 +330,32 @@ export function ActivityDialog({
             {activity ? "Modifier l'activité" : "Nouvelle activité"}
           </DialogTitle>
           <DialogDescription>
-            {fixedDate
-              ? `${formatDayLong(baseDate)} — renseignez les horaires.`
+            {fixedDate || sameDay(activeDate, baseDate)
+              ? `${formatDayLong(activeDate)} — renseignez les horaires.`
               : "Renseignez les détails du créneau."}
           </DialogDescription>
         </DialogHeader>
+
+        {(hasHalfRest || blockedByFullRest) && (
+          <Alert variant={blockedByFullRest ? "destructive" : "default"}>
+            <TriangleAlert className="h-4 w-4" />
+            <AlertTitle>
+              {blockedByFullRest
+                ? "Journée de repos"
+                : restEntry?.rest_period === "morning"
+                  ? "Matin en repos"
+                  : "Après-midi en repos"}
+            </AlertTitle>
+            <AlertDescription>
+              {blockedByFullRest
+                ? "Retirez le repos pour planifier une activité ce jour."
+                : restEntry?.rest_period === "morning"
+                  ? "Les activités doivent se dérouler l'après-midi uniquement."
+                  : "Les activités doivent se dérouler le matin uniquement."}
+            </AlertDescription>
+          </Alert>
+        )}
+
         <div className="space-y-4">
           <div className="space-y-2">
             <Label htmlFor="title">Titre</Label>
@@ -227,6 +365,30 @@ export function ActivityDialog({
               onChange={(e) => setTitle(e.target.value)}
               placeholder="Ex. Livraison Paris centre"
             />
+            <div className="flex flex-wrap gap-2 pt-1">
+              {ACTIVITY_TAG_PRESETS.map((preset) => (
+                <Badge
+                  key={preset.key}
+                  variant="outline"
+                  role="button"
+                  tabIndex={0}
+                  onClick={() => {
+                    setTitle(preset.title);
+                    setType(preset.type);
+                  }}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" || e.key === " ") {
+                      e.preventDefault();
+                      setTitle(preset.title);
+                      setType(preset.type);
+                    }
+                  }}
+                  className="cursor-pointer select-none hover:bg-accent"
+                >
+                  {preset.label}
+                </Badge>
+              ))}
+            </div>
           </div>
           <div className="space-y-2">
             <Label htmlFor="type">Type</Label>
@@ -295,59 +457,101 @@ export function ActivityDialog({
               </Select>
             )}
           </div>
-          {fixedDate ? (
-            <div className="grid grid-cols-2 gap-3">
-              <div className="space-y-2">
-                <Label htmlFor="start-time">Heure de début</Label>
-                <Input
-                  id="start-time"
-                  type="time"
-                  value={startTime}
-                  onChange={(e) => setStartTime(e.target.value)}
-                />
-              </div>
-              <div className="space-y-2">
-                <Label htmlFor="end-time">Heure de fin</Label>
-                <Input
-                  id="end-time"
-                  type="time"
-                  value={endTime}
-                  onChange={(e) => setEndTime(e.target.value)}
-                />
-              </div>
+          {!fixedDate && (
+            <div className="space-y-2">
+              <Label htmlFor="date">Date</Label>
+              <Input
+                id="date"
+                type="date"
+                value={dateField}
+                onChange={(e) => setDateField(e.target.value)}
+              />
             </div>
-          ) : (
-            <>
-              <div className="space-y-2">
-                <Label htmlFor="date">Date</Label>
-                <Input
-                  id="date"
-                  type="date"
-                  value={dateField}
-                  onChange={(e) => setDateField(e.target.value)}
-                />
-              </div>
-              <div className="grid grid-cols-2 gap-3">
-                <div className="space-y-2">
-                  <Label htmlFor="start-time">Heure de début</Label>
-                  <Input
-                    id="start-time"
-                    type="time"
-                    value={startTime}
-                    onChange={(e) => setStartTime(e.target.value)}
-                  />
-                </div>
-                <div className="space-y-2">
-                  <Label htmlFor="end-time">Heure de fin</Label>
-                  <Input
-                    id="end-time"
-                    type="time"
-                    value={endTime}
-                    onChange={(e) => setEndTime(e.target.value)}
-                  />
-                </div>
-              </div>
-            </>
+          )}
+          <div className="space-y-2">
+            <Label>Durée</Label>
+            <ToggleGroup
+              type="single"
+              variant="outline"
+              value={durationKind}
+              onValueChange={(v) => {
+                if (!v) return;
+                const kind = v as DurationKind;
+                setDurationKind(kind);
+                if (kind !== "custom") {
+                  const preset = presets[kind];
+                  setStartTime(preset.start);
+                  setEndTime(preset.end);
+                }
+              }}
+              className="flex flex-wrap gap-2"
+            >
+              <ToggleGroupItem
+                value="full_day"
+                className="flex-1 min-w-[8rem]"
+                disabled={!!restEntry && !availableKinds.includes("full_day")}
+              >
+                Journée ({presets.full_day.start}–{presets.full_day.end})
+              </ToggleGroupItem>
+              <ToggleGroupItem
+                value="morning"
+                className="flex-1 min-w-[8rem]"
+                disabled={!!restEntry && !availableKinds.includes("morning")}
+              >
+                Matin ({presets.morning.start}–{presets.morning.end})
+              </ToggleGroupItem>
+              <ToggleGroupItem
+                value="afternoon"
+                className="flex-1 min-w-[8rem]"
+                disabled={!!restEntry && !availableKinds.includes("afternoon")}
+              >
+                Après-midi ({presets.afternoon.start}–{presets.afternoon.end})
+              </ToggleGroupItem>
+              <ToggleGroupItem value="custom" className="flex-1 min-w-[8rem]">
+                Personnalisé
+              </ToggleGroupItem>
+            </ToggleGroup>
+            {durationKind === "full_day" && presets.full_day.breakMinutes > 0 && (
+              <p className="text-xs text-muted-foreground">
+                Pause de {presets.full_day.breakMinutes} min comprise (non comptée dans le temps de travail).
+              </p>
+            )}
+          </div>
+          <div className="grid grid-cols-2 gap-3">
+            <div className="space-y-2">
+              <Label htmlFor="start-time">Heure de début</Label>
+              <Input
+                id="start-time"
+                type="time"
+                value={startTime}
+                disabled={durationKind !== "custom"}
+                onChange={(e) => setStartTime(e.target.value)}
+              />
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="end-time">Heure de fin</Label>
+              <Input
+                id="end-time"
+                type="time"
+                value={endTime}
+                disabled={durationKind !== "custom"}
+                onChange={(e) => setEndTime(e.target.value)}
+              />
+            </div>
+          </div>
+          {pauseConflict > 0 && (
+            <p className="text-xs text-muted-foreground">
+              Pause de {pauseConflict} min comprise dans le créneau — décomptée automatiquement.
+            </p>
+          )}
+          {restConflict && (
+            <Alert variant="destructive">
+              <TriangleAlert className="h-4 w-4" />
+              <AlertTitle>Chevauchement avec le repos</AlertTitle>
+              <AlertDescription>
+                Le créneau empiète sur la demi-journée de repos ({restConflict.label}). Ajustez les horaires.
+              </AlertDescription>
+            </Alert>
           )}
           <div className="space-y-2">
             <Label htmlFor="location">Lieu</Label>
@@ -390,7 +594,7 @@ export function ActivityDialog({
             >
               Annuler
             </Button>
-            <Button onClick={handleSave} disabled={saving}>
+            <Button onClick={handleSave} disabled={saving || !canSave}>
               {saving ? "Enregistrement..." : "Enregistrer"}
             </Button>
           </div>

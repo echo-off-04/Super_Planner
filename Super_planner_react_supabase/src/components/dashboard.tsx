@@ -4,10 +4,16 @@ import { supabase } from "@/lib/supabase";
 import type {
   Activity,
   ContractSettings,
+  DefaultWeekSettings,
   Profile,
   RestDay,
   RestRules,
+  Vacation,
 } from "@/lib/supabase";
+import { isDateInVacations, vacationIsoSet } from "@/lib/supabase";
+import { DEFAULT_WEEK_FALLBACK } from "@/lib/supabase";
+import type { RestPeriod } from "@/lib/supabase";
+import { overlapMinutes, restRangesForPeriod } from "@/lib/supabase";
 import { ROLE_LABELS } from "@/lib/supabase";
 import {
   addDays,
@@ -29,6 +35,7 @@ import {
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import {
   CalendarClock,
+  CalendarDays,
   ChevronLeft,
   ChevronRight,
   Download,
@@ -46,6 +53,15 @@ import { RestSuggestions } from "./rest-suggestions";
 import { ActivityDialog } from "./activity-dialog";
 import { SettingsDialog } from "./settings-dialog";
 import { ModeToggle } from "./mode-toggle";
+import { ChoiceDialog } from "./choice-dialog";
+import { dailyUsedHours, sameDay } from "@/lib/time";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import {
+  buildHolidayMap,
+  countHolidayCreditHours,
+  getFrenchHolidaysInRange,
+} from "@/lib/holidays";
 
 interface Props {
   user: User;
@@ -60,6 +76,9 @@ export function Dashboard({ user }: Props) {
   const [contract, setContract] = useState<ContractSettings | null>(null);
   const [rules, setRules] = useState<RestRules | null>(null);
   const [profile, setProfile] = useState<Profile | null>(null);
+  const [defaultWeek, setDefaultWeek] = useState<DefaultWeekSettings | null>(
+    null
+  );
   const [activityDialogOpen, setActivityDialogOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [editingActivity, setEditingActivity] = useState<Activity | null>(null);
@@ -67,6 +86,40 @@ export function Dashboard({ user }: Props) {
     Date | undefined
   >();
   const [fixedDate, setFixedDate] = useState(false);
+  const [restConflict, setRestConflict] = useState<{
+    date: Date;
+    period: RestPeriod;
+    activities: Activity[];
+  } | null>(null);
+  const [pendingRestDate, setPendingRestDate] = useState<Date | null>(null);
+  const [moveTargetOpen, setMoveTargetOpen] = useState(false);
+  const [moveTargetDate, setMoveTargetDate] = useState("");
+  const [applyConflictOpen, setApplyConflictOpen] = useState(false);
+  const [overload, setOverload] = useState<{
+    date: Date;
+    excessHours: number;
+    savedId?: string;
+  } | null>(null);
+  const [recupOverwrite, setRecupOverwrite] = useState<{
+    dayDate: Date;
+    remainingMs: number;
+    partialInserts: Array<Record<string, unknown>>;
+  } | null>(null);
+  const [customRecup, setCustomRecup] = useState<{
+    sourceDate: Date;
+    excessMs: number;
+  } | null>(null);
+  const [customRecupDate, setCustomRecupDate] = useState("");
+  const [customRecupTime, setCustomRecupTime] = useState("");
+  const [pendingHolidayActivity, setPendingHolidayActivity] = useState<{
+    date: Date;
+    name: string;
+  } | null>(null);
+  const [pendingVacationActivity, setPendingVacationActivity] = useState<{
+    date: Date;
+    label: string;
+  } | null>(null);
+  const [vacations, setVacations] = useState<Vacation[]>([]);
 
   const rangeStart = useMemo(() => {
     if (view === "day") {
@@ -105,6 +158,64 @@ export function Dashboard({ user }: Props) {
     return { start: startOfWeek(cursor), end: endOfWeek(cursor) };
   }, [cursor, view]);
 
+  const holidaysList = useMemo(
+    () => getFrenchHolidaysInRange(rangeStart, rangeEnd),
+    [rangeStart, rangeEnd]
+  );
+  const holidaysMap = useMemo(
+    () => buildHolidayMap(holidaysList),
+    [holidaysList]
+  );
+  const vacationIsos = useMemo(
+    () =>
+      vacationIsoSet(
+        vacations,
+        formatDateISO(rangeStart),
+        formatDateISO(rangeEnd)
+      ),
+    [vacations, rangeStart, rangeEnd]
+  );
+  const vacationLabelByIso = useMemo(() => {
+    const map = new Map<string, string>();
+    for (const iso of vacationIsos) {
+      const v = isDateInVacations(iso, vacations);
+      map.set(iso, v?.label || "Vacances");
+    }
+    return map;
+  }, [vacationIsos, vacations]);
+  const kpiHolidayRange = useMemo(() => {
+    if (view === "day") {
+      const start = new Date(cursor);
+      start.setHours(0, 0, 0, 0);
+      const end = new Date(cursor);
+      end.setHours(23, 59, 59, 999);
+      return { start, end };
+    }
+    if (view === "week") {
+      return { start: startOfWeek(cursor), end: endOfWeek(cursor) };
+    }
+    const start = new Date(cursor.getFullYear(), cursor.getMonth(), 1);
+    const end = new Date(cursor.getFullYear(), cursor.getMonth() + 1, 0);
+    end.setHours(23, 59, 59, 999);
+    return { start, end };
+  }, [cursor, view]);
+
+  const kpiHolidaysList = useMemo(
+    () => getFrenchHolidaysInRange(kpiHolidayRange.start, kpiHolidayRange.end),
+    [kpiHolidayRange.start, kpiHolidayRange.end]
+  );
+
+  const kpiHolidayCredit = useMemo(() => {
+    const tpl = defaultWeek ?? { ...DEFAULT_WEEK_FALLBACK, id: "", user_id: user.id };
+    return countHolidayCreditHours({
+      dailyHours: contract?.daily_max_hours ?? 8,
+      restDays: tpl.rest_days,
+      holidays: kpiHolidaysList,
+      rangeStart: kpiHolidayRange.start,
+      rangeEnd: kpiHolidayRange.end,
+    });
+  }, [contract, defaultWeek, kpiHolidaysList, kpiHolidayRange.start, kpiHolidayRange.end, user.id]);
+
   const loadData = useCallback(async () => {
     const startIso = rangeStart.toISOString();
     const endIso = rangeEnd.toISOString();
@@ -136,23 +247,29 @@ export function Dashboard({ user }: Props) {
   }, [user.id, rangeStart, rangeEnd, kpiRestRange.start, kpiRestRange.end]);
 
   const loadSettings = useCallback(async () => {
-    const [contractRes, rulesRes, profileRes] = await Promise.all([
-      supabase
-        .from("contract_settings")
-        .select("*")
-        .eq("user_id", user.id)
-        .maybeSingle(),
-      supabase
-        .from("rest_rules")
-        .select("*")
-        .eq("user_id", user.id)
-        .maybeSingle(),
-      supabase
-        .from("profiles")
-        .select("*")
-        .eq("id", user.id)
-        .maybeSingle(),
-    ]);
+    const [contractRes, rulesRes, profileRes, defaultWeekRes] =
+      await Promise.all([
+        supabase
+          .from("contract_settings")
+          .select("*")
+          .eq("user_id", user.id)
+          .maybeSingle(),
+        supabase
+          .from("rest_rules")
+          .select("*")
+          .eq("user_id", user.id)
+          .maybeSingle(),
+        supabase
+          .from("profiles")
+          .select("*")
+          .eq("id", user.id)
+          .maybeSingle(),
+        supabase
+          .from("default_week_settings")
+          .select("*")
+          .eq("user_id", user.id)
+          .maybeSingle(),
+      ]);
 
     if (!profileRes.data) {
       const { data } = await supabase
@@ -186,6 +303,24 @@ export function Dashboard({ user }: Props) {
     } else {
       setRules(rulesRes.data as RestRules);
     }
+
+    if (!defaultWeekRes.data) {
+      const { data } = await supabase
+        .from("default_week_settings")
+        .insert({ user_id: user.id })
+        .select()
+        .maybeSingle();
+      setDefaultWeek(data as DefaultWeekSettings);
+    } else {
+      setDefaultWeek(defaultWeekRes.data as DefaultWeekSettings);
+    }
+
+    const vacRes = await supabase
+      .from("vacations")
+      .select("*")
+      .eq("user_id", user.id)
+      .order("start_date", { ascending: true });
+    setVacations((vacRes.data as Vacation[]) ?? []);
   }, [user.id]);
 
   useEffect(() => {
@@ -228,9 +363,42 @@ export function Dashboard({ user }: Props) {
   }, [view, cursor, weekStart, weekEnd]);
 
   function openNewActivity(date?: Date) {
+    if (date) {
+      const iso = formatDateISO(date);
+      const vac = isDateInVacations(iso, vacations);
+      if (vac) {
+        setPendingVacationActivity({ date, label: vac.label || "Vacances" });
+        return;
+      }
+      const holidayName = holidaysMap.get(iso);
+      if (holidayName) {
+        setPendingHolidayActivity({ date, name: holidayName });
+        return;
+      }
+    }
     setEditingActivity(null);
     setDefaultActivityDate(date);
     setFixedDate(Boolean(date));
+    setActivityDialogOpen(true);
+  }
+
+  function confirmHolidayActivity() {
+    if (!pendingHolidayActivity) return;
+    const date = pendingHolidayActivity.date;
+    setPendingHolidayActivity(null);
+    setEditingActivity(null);
+    setDefaultActivityDate(date);
+    setFixedDate(true);
+    setActivityDialogOpen(true);
+  }
+
+  function confirmVacationActivity() {
+    if (!pendingVacationActivity) return;
+    const date = pendingVacationActivity.date;
+    setPendingVacationActivity(null);
+    setEditingActivity(null);
+    setDefaultActivityDate(date);
+    setFixedDate(true);
     setActivityDialogOpen(true);
   }
 
@@ -241,45 +409,837 @@ export function Dashboard({ user }: Props) {
     setActivityDialogOpen(true);
   }
 
-  async function toggleRestDay(date: Date) {
+  async function markAsRestDay(date: Date, period: RestPeriod = "full_day") {
     const iso = formatDateISO(date);
     const existing = restDays.find((r) => r.rest_date === iso);
-    if (existing) {
-      if (existing.status === "validated") {
-        await supabase.from("rest_days").delete().eq("id", existing.id);
-      } else {
-        await supabase
-          .from("rest_days")
-          .update({ status: "validated" })
-          .eq("id", existing.id);
-      }
-    } else {
-      await supabase.from("rest_days").insert({
-        user_id: user.id,
-        rest_date: iso,
-        status: "validated",
-        reason: "Validé manuellement",
-      });
+    if (existing?.kind === "sick") {
+      toast.error(
+        "Ce jour est un repos maladie. Modifiez-le depuis les paramètres."
+      );
+      return;
     }
-    loadData();
-  }
-
-  async function validateSuggestion(date: Date) {
-    const iso = formatDateISO(date);
-    const existing = restDays.find((r) => r.rest_date === iso);
     if (existing) {
       await supabase
         .from("rest_days")
-        .update({ status: "validated" })
+        .update({
+          status: "validated",
+          reason: "Validé manuellement",
+          rest_period: period,
+          kind: "regular",
+        })
         .eq("id", existing.id);
     } else {
       await supabase.from("rest_days").insert({
         user_id: user.id,
         rest_date: iso,
         status: "validated",
-        reason: "Suggestion validée",
+        reason: "Validé manuellement",
+        rest_period: period,
+        kind: "regular",
       });
     }
+  }
+
+  function activitiesOverlappingPeriod(
+    date: Date,
+    period: RestPeriod
+  ): Activity[] {
+    const ranges = restRangesForPeriod(period, defaultWeek);
+    return activities.filter((a) => {
+      if (!sameDay(new Date(a.start_time), date)) return false;
+      if (a.activity_type === "pause") return false;
+      const s = new Date(a.start_time);
+      const e = new Date(a.end_time);
+      const sMin = s.getHours() * 60 + s.getMinutes();
+      const eMin = e.getHours() * 60 + e.getMinutes();
+      return ranges.some(
+        (r) => overlapMinutes(sMin, eMin, r.startMin, r.endMin) > 0
+      );
+    });
+  }
+
+  async function applyRestWithPeriod(date: Date, period: RestPeriod) {
+    const conflicting = activitiesOverlappingPeriod(date, period);
+    if (conflicting.length > 0) {
+      setRestConflict({ date, period, activities: conflicting });
+      return;
+    }
+    await markAsRestDay(date, period);
+    loadData();
+  }
+
+  function toggleRestDay(date: Date) {
+    const iso = formatDateISO(date);
+    const existing = restDays.find((r) => r.rest_date === iso);
+    if (existing?.kind === "sick") {
+      toast.error(
+        "Ce jour est un repos maladie. Gérez-le depuis les paramètres."
+      );
+      return;
+    }
+    if (existing?.status === "validated") {
+      supabase
+        .from("rest_days")
+        .delete()
+        .eq("id", existing.id)
+        .then(() => loadData());
+      return;
+    }
+    if (vacationIsos.has(iso)) {
+      toast.error(
+        "Impossible de marquer un jour de vacances comme jour de repos."
+      );
+      return;
+    }
+    setPendingRestDate(date);
+  }
+
+  async function handleDeleteAndRest() {
+    if (!restConflict) return;
+    const ids = restConflict.activities.map((a) => a.id);
+    await supabase.from("activities").delete().in("id", ids);
+    await markAsRestDay(restConflict.date, restConflict.period);
+    setRestConflict(null);
+    loadData();
+  }
+
+  function openMoveActivities() {
+    if (!restConflict) return;
+    const nextDay = addDays(restConflict.date, 1);
+    setMoveTargetDate(formatDateISO(nextDay));
+    setMoveTargetOpen(true);
+  }
+
+  async function handleMoveAndRest() {
+    if (!restConflict || !moveTargetDate) return;
+    const [y, mo, day] = moveTargetDate.split("-").map(Number);
+    const target = new Date(y, (mo ?? 1) - 1, day ?? 1);
+    if (sameDay(target, restConflict.date)) {
+      toast.error("Choisissez une date différente du jour de repos.");
+      return;
+    }
+    const updates = restConflict.activities.map((a) => {
+      const start = new Date(a.start_time);
+      const end = new Date(a.end_time);
+      const newStart = new Date(target);
+      newStart.setHours(start.getHours(), start.getMinutes(), 0, 0);
+      const newEnd = new Date(target);
+      newEnd.setHours(end.getHours(), end.getMinutes(), 0, 0);
+      return supabase
+        .from("activities")
+        .update({
+          start_time: newStart.toISOString(),
+          end_time: newEnd.toISOString(),
+        })
+        .eq("id", a.id);
+    });
+    await Promise.all(updates);
+    await markAsRestDay(restConflict.date, restConflict.period);
+    setMoveTargetOpen(false);
+    setRestConflict(null);
+    loadData();
+    toast.success("Activités déplacées et jour marqué comme repos.");
+  }
+
+  function requestApplyDefaultWeek() {
+    const weekStart = startOfWeek(cursor);
+    const weekEnd = endOfWeek(weekStart);
+    const hasExisting = activities.some((a) => {
+      const d = new Date(a.start_time);
+      return d >= weekStart && d <= weekEnd;
+    });
+    if (hasExisting) {
+      setApplyConflictOpen(true);
+    } else {
+      applyDefaultWeek(weekStart, "empty-only");
+    }
+  }
+
+  async function applyDefaultWeek(
+    weekStart: Date,
+    mode: "empty-only" | "overwrite" = "empty-only"
+  ) {
+    const tpl = defaultWeek ?? {
+      ...DEFAULT_WEEK_FALLBACK,
+      id: "",
+      user_id: user.id,
+    };
+    const weekEnd = endOfWeek(weekStart);
+    const holidayIsoSetForWipe = new Set(
+      getFrenchHolidaysInRange(weekStart, weekEnd).map((h) => h.date)
+    );
+    const vacationIsoSetForWipe = vacationIsoSet(
+      vacations,
+      formatDateISO(weekStart),
+      formatDateISO(weekEnd)
+    );
+    const sickIsoSetForWipe = new Set(
+      restDays.filter((r) => r.kind === "sick").map((r) => r.rest_date)
+    );
+    const isProtectedIso = (iso: string) =>
+      holidayIsoSetForWipe.has(iso) ||
+      vacationIsoSetForWipe.has(iso) ||
+      sickIsoSetForWipe.has(iso);
+    const weekActivities = activities.filter((a) => {
+      const d = new Date(a.start_time);
+      return d >= weekStart && d <= weekEnd;
+    });
+    const weekIsoDates = new Set<string>();
+    for (let i = 0; i < 7; i++) {
+      weekIsoDates.add(formatDateISO(addDays(weekStart, i)));
+    }
+    const existingRestIsoSet = new Set(
+      restDays
+        .filter((r) => weekIsoDates.has(r.rest_date))
+        .map((r) => r.rest_date)
+    );
+    const sickRestIsoSet = new Set(
+      restDays
+        .filter((r) => r.kind === "sick" && weekIsoDates.has(r.rest_date))
+        .map((r) => r.rest_date)
+    );
+    const existingActivityIsoSet = new Set(
+      weekActivities.map((a) => formatDateISO(new Date(a.start_time)))
+    );
+
+    if (mode === "overwrite") {
+      const deletableActivities = weekActivities.filter(
+        (a) => !isProtectedIso(formatDateISO(new Date(a.start_time)))
+      );
+      if (deletableActivities.length > 0) {
+        await supabase
+          .from("activities")
+          .delete()
+          .in(
+            "id",
+            deletableActivities.map((a) => a.id)
+          );
+      }
+      const deletableRestIsos = Array.from(existingRestIsoSet).filter(
+        (iso) => !isProtectedIso(iso)
+      );
+      if (deletableRestIsos.length > 0) {
+        await supabase
+          .from("rest_days")
+          .delete()
+          .eq("user_id", user.id)
+          .in("rest_date", deletableRestIsos);
+        for (const iso of deletableRestIsos) existingRestIsoSet.delete(iso);
+      }
+      for (const iso of Array.from(existingActivityIsoSet)) {
+        if (!isProtectedIso(iso)) existingActivityIsoSet.delete(iso);
+      }
+    }
+
+    const parseTime = (t: string): [number, number] => {
+      const [h, m] = t.split(":").map(Number);
+      return [h ?? 0, m ?? 0];
+    };
+    const [mStartH, mStartM] = parseTime(tpl.morning_start);
+    const [mEndH, mEndM] = parseTime(tpl.morning_end);
+    const [aStartH, aStartM] = parseTime(tpl.afternoon_start);
+    const [aEndH, aEndM] = parseTime(tpl.afternoon_end);
+    const [pStartH, pStartM] = parseTime(tpl.pause_start);
+    const [pEndH, pEndM] = parseTime(tpl.pause_end);
+    const pauseStartMin = pStartH * 60 + pStartM;
+    const pauseEndMin = pEndH * 60 + pEndM;
+    const hasPause = pauseEndMin > pauseStartMin;
+
+    const activityInserts: Array<Record<string, unknown>> = [];
+    const restInserts: Array<Record<string, unknown>> = [];
+    const restDatesToClear: string[] = [];
+    const holidayIsoSet = new Set(
+      getFrenchHolidaysInRange(weekStart, endOfWeek(weekStart)).map((h) => h.date)
+    );
+    const weekVacationIsoSet = vacationIsoSet(
+      vacations,
+      formatDateISO(weekStart),
+      formatDateISO(endOfWeek(weekStart))
+    );
+
+    for (let i = 0; i < 7; i++) {
+      const day = addDays(weekStart, i);
+      const dayNumber = i + 1;
+      const iso = formatDateISO(day);
+      const isTemplateRest = tpl.rest_days.includes(dayNumber);
+      const hasActivity = existingActivityIsoSet.has(iso);
+      const hasRest = existingRestIsoSet.has(iso);
+      const isHoliday = holidayIsoSet.has(iso);
+      const isVacation = weekVacationIsoSet.has(iso);
+      const isSick = sickRestIsoSet.has(iso);
+
+      if (isHoliday || isVacation || isSick) {
+        continue;
+      }
+
+      if (hasActivity) {
+        continue;
+      }
+
+      if (isTemplateRest) {
+        if (!hasRest) {
+          restInserts.push({
+            user_id: user.id,
+            rest_date: iso,
+            status: "validated",
+            reason: "Semaine type",
+            rest_period: "full_day",
+          });
+        }
+        continue;
+      }
+
+      if (hasRest) {
+        restDatesToClear.push(iso);
+      }
+
+      const morningStart = new Date(day);
+      morningStart.setHours(mStartH, mStartM, 0, 0);
+      const morningEnd = new Date(day);
+      morningEnd.setHours(mEndH, mEndM, 0, 0);
+      const afternoonStart = new Date(day);
+      afternoonStart.setHours(aStartH, aStartM, 0, 0);
+      const afternoonEnd = new Date(day);
+      afternoonEnd.setHours(aEndH, aEndM, 0, 0);
+      activityInserts.push({
+        user_id: user.id,
+        title: tpl.default_title,
+        activity_type: tpl.default_type,
+        start_time: morningStart.toISOString(),
+        end_time: morningEnd.toISOString(),
+        location: "",
+        notes: "",
+        source: "default_week",
+        duration_kind: "custom",
+        break_minutes: 0,
+      });
+      activityInserts.push({
+        user_id: user.id,
+        title: tpl.default_title,
+        activity_type: tpl.default_type,
+        start_time: afternoonStart.toISOString(),
+        end_time: afternoonEnd.toISOString(),
+        location: "",
+        notes: "",
+        source: "default_week",
+        duration_kind: "custom",
+        break_minutes: 0,
+      });
+      if (hasPause) {
+        const pauseStart = new Date(day);
+        pauseStart.setHours(pStartH, pStartM, 0, 0);
+        const pauseEnd = new Date(day);
+        pauseEnd.setHours(pEndH, pEndM, 0, 0);
+        activityInserts.push({
+          user_id: user.id,
+          title: "Pause",
+          activity_type: "pause",
+          start_time: pauseStart.toISOString(),
+          end_time: pauseEnd.toISOString(),
+          location: "",
+          notes: "",
+          source: "default_week",
+          duration_kind: "custom",
+          break_minutes: 0,
+        });
+      }
+    }
+
+    if (restDatesToClear.length > 0) {
+      await supabase
+        .from("rest_days")
+        .delete()
+        .eq("user_id", user.id)
+        .in("rest_date", restDatesToClear);
+    }
+    if (activityInserts.length > 0) {
+      await supabase.from("activities").insert(activityInserts);
+    }
+    if (restInserts.length > 0) {
+      await supabase.from("rest_days").insert(restInserts);
+    }
+    loadData();
+    toast.success("Semaine par défaut appliquée.");
+  }
+
+  async function validateSuggestion(date: Date) {
+    const iso = formatDateISO(date);
+    const existing = restDays.find((r) => r.rest_date === iso);
+    const period: RestPeriod = existing?.rest_period ?? "full_day";
+    const conflicting = activitiesOverlappingPeriod(date, period);
+    if (conflicting.length > 0) {
+      setRestConflict({ date, period, activities: conflicting });
+      return;
+    }
+    await markAsRestDay(date, period);
+    loadData();
+  }
+
+  function mergeRecupInserts(
+    items: Array<Record<string, unknown>>
+  ): Array<Record<string, unknown>> {
+    const recups = items
+      .filter((i) => i.activity_type === "recuperation")
+      .map((i) => ({
+        start: new Date(i.start_time as string).getTime(),
+        end: new Date(i.end_time as string).getTime(),
+        raw: i,
+      }))
+      .sort((a, b) => a.start - b.start);
+    const others = items.filter((i) => i.activity_type !== "recuperation");
+    const merged: Array<{ start: number; end: number; raw: Record<string, unknown> }> = [];
+    for (const r of recups) {
+      const last = merged[merged.length - 1];
+      if (last && r.start <= last.end) {
+        last.end = Math.max(last.end, r.end);
+      } else {
+        merged.push({ start: r.start, end: r.end, raw: r.raw });
+      }
+    }
+    const mergedRecups = merged.map((m) => ({
+      ...m.raw,
+      start_time: new Date(m.start).toISOString(),
+      end_time: new Date(m.end).toISOString(),
+    }));
+    return [...others, ...mergedRecups];
+  }
+
+  async function handleActivitySaved(info?: {
+    savedDate?: Date;
+    savedId?: string;
+  }) {
+    await loadData();
+    if (!info?.savedDate) return;
+    const day = new Date(info.savedDate);
+    day.setHours(0, 0, 0, 0);
+    const dayEnd = new Date(day);
+    dayEnd.setHours(23, 59, 59, 999);
+    const { data } = await supabase
+      .from("activities")
+      .select("*")
+      .eq("user_id", user.id)
+      .gte("start_time", day.toISOString())
+      .lte("start_time", dayEnd.toISOString());
+    const dayActs = (data as Activity[]) ?? [];
+    const maxDaily = contract?.daily_max_hours ?? 10;
+    const hours = dailyUsedHours(dayActs);
+    if (hours > maxDaily + 1e-6) {
+      setOverload({
+        date: day,
+        excessHours: hours - maxDaily,
+        savedId: info.savedId,
+      });
+    }
+  }
+
+  async function reduceSavedActivity() {
+    if (!overload) return;
+    const hoursToRemove = overload.excessHours;
+    const day = overload.date;
+    const dayEnd = new Date(day);
+    dayEnd.setHours(23, 59, 59, 999);
+    const { data } = await supabase
+      .from("activities")
+      .select("*")
+      .eq("user_id", user.id)
+      .gte("start_time", day.toISOString())
+      .lte("start_time", dayEnd.toISOString())
+      .order("start_time");
+    const acts = (data as Activity[]) ?? [];
+    let target: Activity | undefined;
+    if (overload.savedId) {
+      target = acts.find((a) => a.id === overload.savedId);
+    }
+    if (!target) {
+      target = [...acts]
+        .reverse()
+        .find(
+          (a) =>
+            a.activity_type !== "pause" && a.activity_type !== "recuperation"
+        );
+    }
+    if (!target) {
+      setOverload(null);
+      return;
+    }
+    const start = new Date(target.start_time).getTime();
+    const end = new Date(target.end_time).getTime();
+    const newEnd = end - hoursToRemove * 3600 * 1000;
+    if (newEnd <= start) {
+      await supabase.from("activities").delete().eq("id", target.id);
+    } else {
+      await supabase
+        .from("activities")
+        .update({ end_time: new Date(newEnd).toISOString() })
+        .eq("id", target.id);
+    }
+    setOverload(null);
+    toast.success("Activité réduite pour respecter la limite journalière.");
+    loadData();
+  }
+
+  async function scheduleRecuperation() {
+    if (!overload) return;
+    const dayDate = overload.date;
+    const excessMs = overload.excessHours * 3600 * 1000;
+    const nextDay = addDays(dayDate, 1);
+    const nextIso = formatDateISO(nextDay);
+
+    const { data: restData } = await supabase
+      .from("rest_days")
+      .select("*")
+      .eq("user_id", user.id)
+      .eq("rest_date", nextIso)
+      .eq("status", "validated")
+      .maybeSingle();
+    if (restData) {
+      toast.error(
+        "Le jour suivant est un jour de repos complet. Récupération impossible."
+      );
+      setOverload(null);
+      return;
+    }
+    if (isDateInVacations(nextIso, vacations)) {
+      toast.error(
+        "Le jour suivant est en vacances. Récupération impossible."
+      );
+      setOverload(null);
+      return;
+    }
+    if (holidaysMap.get(nextIso)) {
+      toast.error(
+        "Le jour suivant est férié. Récupération impossible."
+      );
+      setOverload(null);
+      return;
+    }
+
+    const nextStart = new Date(nextDay);
+    nextStart.setHours(0, 0, 0, 0);
+    const nextEnd = new Date(nextDay);
+    nextEnd.setHours(23, 59, 59, 999);
+    const { data: nda } = await supabase
+      .from("activities")
+      .select("*")
+      .eq("user_id", user.id)
+      .gte("start_time", nextStart.toISOString())
+      .lte("start_time", nextEnd.toISOString())
+      .order("start_time");
+    const nextActs = ((nda as Activity[]) ?? []).slice();
+
+    const tpl = defaultWeek ?? {
+      ...DEFAULT_WEEK_FALLBACK,
+      id: "",
+      user_id: user.id,
+    };
+    const parseTime = (t: string) => {
+      const [h, m] = t.split(":").map(Number);
+      return (h ?? 0) * 60 + (m ?? 0);
+    };
+    const winStartMin = parseTime(tpl.morning_start);
+    const winEndMin = parseTime(tpl.afternoon_end);
+    const winStart = new Date(nextDay);
+    winStart.setHours(Math.floor(winStartMin / 60), winStartMin % 60, 0, 0);
+    const winEnd = new Date(nextDay);
+    winEnd.setHours(Math.floor(winEndMin / 60), winEndMin % 60, 0, 0);
+
+    const occupied = nextActs
+      .map((a) => ({
+        id: a.id,
+        isPause:
+          a.activity_type === "pause" || a.activity_type === "recuperation",
+        start: new Date(a.start_time).getTime(),
+        end: new Date(a.end_time).getTime(),
+      }))
+      .sort((a, b) => a.start - b.start);
+
+    const inserts: Array<Record<string, unknown>> = [];
+    let remaining = excessMs;
+    let cursor = winStart.getTime();
+    const windowEnd = winEnd.getTime();
+
+    const makeRecup = (s: number, e: number) => ({
+      user_id: user.id,
+      title: "Récupération",
+      activity_type: "recuperation",
+      start_time: new Date(s).toISOString(),
+      end_time: new Date(e).toISOString(),
+      location: "",
+      notes: "",
+      source: "recuperation",
+      duration_kind: "custom",
+      break_minutes: 0,
+    });
+
+    for (const occ of occupied) {
+      if (remaining <= 0 || cursor >= windowEnd) break;
+      if (occ.end <= cursor) continue;
+      if (occ.start > cursor) {
+        const gapEnd = Math.min(occ.start, windowEnd);
+        const slotMs = Math.min(remaining, gapEnd - cursor);
+        if (slotMs > 0) {
+          inserts.push(makeRecup(cursor, cursor + slotMs));
+          remaining -= slotMs;
+        }
+      }
+      cursor = Math.max(cursor, occ.end);
+    }
+    if (remaining > 0 && cursor < windowEnd) {
+      const slotMs = Math.min(remaining, windowEnd - cursor);
+      inserts.push(makeRecup(cursor, cursor + slotMs));
+      remaining -= slotMs;
+    }
+
+    if (remaining > 0) {
+      setOverload(null);
+      setRecupOverwrite({
+        dayDate,
+        remainingMs: remaining,
+        partialInserts: inserts,
+      });
+      return;
+    }
+
+    const finalInserts = mergeRecupInserts(inserts);
+    if (finalInserts.length > 0) {
+      await supabase.from("activities").insert(finalInserts);
+    }
+    setOverload(null);
+    toast.success("Récupération planifiée pour le lendemain.");
+    loadData();
+  }
+
+  function openCustomRecup() {
+    if (!overload) return;
+    const next = addDays(overload.date, 1);
+    setCustomRecup({
+      sourceDate: overload.date,
+      excessMs: overload.excessHours * 3600 * 1000,
+    });
+    setCustomRecupDate(formatDateISO(next));
+    setCustomRecupTime("");
+    setOverload(null);
+  }
+
+  async function confirmCustomRecup() {
+    if (!customRecup) return;
+    const { excessMs } = customRecup;
+    if (!customRecupDate) {
+      toast.error("Veuillez choisir une date.");
+      return;
+    }
+    const target = new Date(customRecupDate + "T00:00:00");
+
+    const { data: restData } = await supabase
+      .from("rest_days")
+      .select("*")
+      .eq("user_id", user.id)
+      .eq("rest_date", customRecupDate)
+      .eq("status", "validated")
+      .maybeSingle();
+    if (restData) {
+      toast.error(
+        "Ce jour est un jour de repos complet. Choisissez une autre date."
+      );
+      return;
+    }
+    if (isDateInVacations(customRecupDate, vacations)) {
+      toast.error("Ce jour est en vacances. Choisissez une autre date.");
+      return;
+    }
+    if (holidaysMap.get(customRecupDate)) {
+      toast.error("Ce jour est férié. Choisissez une autre date.");
+      return;
+    }
+
+    const dayStart = new Date(target);
+    dayStart.setHours(0, 0, 0, 0);
+    const dayEnd = new Date(target);
+    dayEnd.setHours(23, 59, 59, 999);
+    const { data: dayData } = await supabase
+      .from("activities")
+      .select("*")
+      .eq("user_id", user.id)
+      .gte("start_time", dayStart.toISOString())
+      .lte("start_time", dayEnd.toISOString())
+      .order("start_time");
+    const dayActs = (dayData as Activity[]) ?? [];
+
+    const inserts: Array<Record<string, unknown>> = [];
+    const makeRecup = (s: number, e: number) => ({
+      user_id: user.id,
+      title: "Récupération",
+      activity_type: "recuperation",
+      start_time: new Date(s).toISOString(),
+      end_time: new Date(e).toISOString(),
+      location: "",
+      notes: "",
+      source: "recuperation",
+      duration_kind: "custom",
+      break_minutes: 0,
+    });
+
+    if (customRecupTime) {
+      const [hh, mm] = customRecupTime.split(":").map(Number);
+      const startDate = new Date(target);
+      startDate.setHours(hh ?? 0, mm ?? 0, 0, 0);
+      const startMs = startDate.getTime();
+      const endMs = startMs + excessMs;
+      const conflict = dayActs.some((a) => {
+        const s = new Date(a.start_time).getTime();
+        const e = new Date(a.end_time).getTime();
+        return startMs < e && endMs > s;
+      });
+      if (conflict) {
+        toast.error(
+          "L'horaire choisi chevauche une activité existante. Modifiez l'heure ou la date."
+        );
+        return;
+      }
+      inserts.push(makeRecup(startMs, endMs));
+    } else {
+      const tpl = defaultWeek ?? {
+        ...DEFAULT_WEEK_FALLBACK,
+        id: "",
+        user_id: user.id,
+      };
+      const parseTime = (t: string) => {
+        const [h, m] = t.split(":").map(Number);
+        return (h ?? 0) * 60 + (m ?? 0);
+      };
+      const winStartMin = parseTime(tpl.morning_start);
+      const winEndMin = parseTime(tpl.afternoon_end);
+      const winStart = new Date(target);
+      winStart.setHours(Math.floor(winStartMin / 60), winStartMin % 60, 0, 0);
+      const winEnd = new Date(target);
+      winEnd.setHours(Math.floor(winEndMin / 60), winEndMin % 60, 0, 0);
+
+      const occupied = dayActs
+        .map((a) => ({
+          start: new Date(a.start_time).getTime(),
+          end: new Date(a.end_time).getTime(),
+        }))
+        .sort((a, b) => a.start - b.start);
+
+      let remaining = excessMs;
+      let cursor = winStart.getTime();
+      const windowEnd = winEnd.getTime();
+
+      for (const occ of occupied) {
+        if (remaining <= 0 || cursor >= windowEnd) break;
+        if (occ.end <= cursor) continue;
+        if (occ.start > cursor) {
+          const gapEnd = Math.min(occ.start, windowEnd);
+          const slotMs = Math.min(remaining, gapEnd - cursor);
+          if (slotMs > 0) {
+            inserts.push(makeRecup(cursor, cursor + slotMs));
+            remaining -= slotMs;
+          }
+        }
+        cursor = Math.max(cursor, occ.end);
+      }
+      if (remaining > 0 && cursor < windowEnd) {
+        const slotMs = Math.min(remaining, windowEnd - cursor);
+        inserts.push(makeRecup(cursor, cursor + slotMs));
+        remaining -= slotMs;
+      }
+
+      if (remaining > 0) {
+        toast.error(
+          `Impossible de placer ${(remaining / 3600000).toFixed(2)} h dans la fenêtre de travail. Choisissez une heure précise ou une autre date.`
+        );
+        return;
+      }
+    }
+
+    const finalInserts = mergeRecupInserts(inserts);
+    if (finalInserts.length > 0) {
+      await supabase.from("activities").insert(finalInserts);
+    }
+    setCustomRecup(null);
+    toast.success("Récupération planifiée.");
+    loadData();
+  }
+
+  async function confirmRecupOverwrite() {
+    if (!recupOverwrite) return;
+    const { dayDate, remainingMs, partialInserts } = recupOverwrite;
+    const nextDay = addDays(dayDate, 1);
+    const nextStart = new Date(nextDay);
+    nextStart.setHours(0, 0, 0, 0);
+    const nextEnd = new Date(nextDay);
+    nextEnd.setHours(23, 59, 59, 999);
+    const { data: nda } = await supabase
+      .from("activities")
+      .select("*")
+      .eq("user_id", user.id)
+      .gte("start_time", nextStart.toISOString())
+      .lte("start_time", nextEnd.toISOString())
+      .order("start_time");
+    const nextActs = ((nda as Activity[]) ?? []).slice();
+
+    const inserts = partialInserts.slice();
+    const deletes: string[] = [];
+    const updates: Array<{ id: string; start_time: string }> = [];
+    let remaining = remainingMs;
+
+    for (const a of nextActs) {
+      if (remaining <= 0) break;
+      if (a.activity_type === "pause" || a.activity_type === "recuperation") {
+        continue;
+      }
+      const s = new Date(a.start_time).getTime();
+      const e = new Date(a.end_time).getTime();
+      const dur = e - s;
+      if (dur <= remaining) {
+        deletes.push(a.id);
+        inserts.push({
+          user_id: user.id,
+          title: "Récupération",
+          activity_type: "recuperation",
+          start_time: new Date(s).toISOString(),
+          end_time: new Date(e).toISOString(),
+          location: "",
+          notes: "",
+          source: "recuperation",
+          duration_kind: "custom",
+          break_minutes: 0,
+        });
+        remaining -= dur;
+      } else {
+        const newStart = s + remaining;
+        updates.push({ id: a.id, start_time: new Date(newStart).toISOString() });
+        inserts.push({
+          user_id: user.id,
+          title: "Récupération",
+          activity_type: "recuperation",
+          start_time: new Date(s).toISOString(),
+          end_time: new Date(newStart).toISOString(),
+          location: "",
+          notes: "",
+          source: "recuperation",
+          duration_kind: "custom",
+          break_minutes: 0,
+        });
+        remaining = 0;
+      }
+    }
+
+    if (deletes.length > 0) {
+      await supabase.from("activities").delete().in("id", deletes);
+    }
+    for (const u of updates) {
+      await supabase
+        .from("activities")
+        .update({ start_time: u.start_time })
+        .eq("id", u.id);
+    }
+    const finalInserts = mergeRecupInserts(inserts);
+    if (finalInserts.length > 0) {
+      await supabase.from("activities").insert(finalInserts);
+    }
+    setRecupOverwrite(null);
+    toast.success("Récupération planifiée avec écrasement partiel.");
     loadData();
   }
 
@@ -353,6 +1313,23 @@ export function Dashboard({ user }: Props) {
           <div className="flex items-center gap-2">
             <Button
               size="sm"
+              variant="outline"
+              onClick={() => requestApplyDefaultWeek()}
+              className="hidden md:inline-flex"
+            >
+              <CalendarDays className="mr-1 h-4 w-4" /> Semaine type
+            </Button>
+            <Button
+              size="icon"
+              variant="outline"
+              onClick={() => requestApplyDefaultWeek()}
+              className="md:hidden"
+              aria-label="Appliquer la semaine type"
+            >
+              <CalendarDays className="h-4 w-4" />
+            </Button>
+            <Button
+              size="sm"
               onClick={() => openNewActivity()}
               className="hidden sm:inline-flex"
             >
@@ -406,10 +1383,17 @@ export function Dashboard({ user }: Props) {
 
       <main className="mx-auto flex max-w-7xl flex-col gap-6 px-4 py-6 md:px-6">
         <StatsCards
-          activities={activities}
+          activities={activities.filter((a) => {
+            const t = new Date(a.start_time).getTime();
+            return (
+              t >= kpiHolidayRange.start.getTime() &&
+              t <= kpiHolidayRange.end.getTime()
+            );
+          })}
           contract={contract}
           restDaysCount={validatedCount}
           view={view}
+          holidayCredit={kpiHolidayCredit}
         />
 
         <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
@@ -460,6 +1444,11 @@ export function Dashboard({ user }: Props) {
             activities={activities}
             restDays={restDays}
             contract={contract}
+            holidayName={holidaysMap.get(formatDateISO(cursor)) ?? null}
+            vacationLabel={
+              isDateInVacations(formatDateISO(cursor), vacations)?.label ??
+              (vacationIsos.has(formatDateISO(cursor)) ? "Vacances" : null)
+            }
             previousDayActivities={activities.filter((a) => {
               const d = new Date(a.start_time);
               const prev = addDays(cursor, -1);
@@ -481,6 +1470,8 @@ export function Dashboard({ user }: Props) {
               activities={activities}
               restDays={restDays}
               contract={contract}
+              holidays={holidaysMap}
+              vacations={vacationLabelByIso}
               onAddActivity={openNewActivity}
               onEditActivity={openEditActivity}
               onToggleRest={toggleRestDay}
@@ -500,6 +1491,8 @@ export function Dashboard({ user }: Props) {
             month={cursor}
             activities={activities}
             restDays={restDays}
+            contract={contract}
+            holidays={holidaysMap}
             onSelectDay={(d) => {
               setCursor(d);
               setView("day");
@@ -515,7 +1508,9 @@ export function Dashboard({ user }: Props) {
         activity={editingActivity}
         defaultDate={defaultActivityDate}
         fixedDate={fixedDate}
-        onSaved={loadData}
+        defaultWeek={defaultWeek}
+        restDays={restDays}
+        onSaved={handleActivitySaved}
       />
       <SettingsDialog
         open={settingsOpen}
@@ -524,8 +1519,340 @@ export function Dashboard({ user }: Props) {
         contract={contract}
         rules={rules}
         profile={profile}
-        onSaved={loadSettings}
+        defaultWeek={defaultWeek}
+        onSaved={() => {
+          loadSettings();
+          loadData();
+        }}
+        onApplyDefaultWeek={() => requestApplyDefaultWeek()}
       />
+      <ChoiceDialog
+        open={pendingRestDate !== null}
+        onOpenChange={(o) => {
+          if (!o) setPendingRestDate(null);
+        }}
+        title="Marquer ce jour comme repos"
+        description={
+          pendingRestDate
+            ? `Choisissez la portée du repos pour le ${formatDateISO(pendingRestDate)}.`
+            : undefined
+        }
+        actions={[
+          {
+            key: "full_day",
+            label: "Journée complète",
+            variant: "default",
+            onSelect: () => {
+              const d = pendingRestDate;
+              setPendingRestDate(null);
+              if (d) applyRestWithPeriod(d, "full_day");
+            },
+          },
+          {
+            key: "morning",
+            label: `Demi-journée matin (${(defaultWeek ?? DEFAULT_WEEK_FALLBACK).morning_start}–${(defaultWeek ?? DEFAULT_WEEK_FALLBACK).morning_end})`,
+            variant: "secondary",
+            onSelect: () => {
+              const d = pendingRestDate;
+              setPendingRestDate(null);
+              if (d) applyRestWithPeriod(d, "morning");
+            },
+          },
+          {
+            key: "afternoon",
+            label: `Demi-journée après-midi (${(defaultWeek ?? DEFAULT_WEEK_FALLBACK).afternoon_start}–${(defaultWeek ?? DEFAULT_WEEK_FALLBACK).afternoon_end})`,
+            variant: "secondary",
+            onSelect: () => {
+              const d = pendingRestDate;
+              setPendingRestDate(null);
+              if (d) applyRestWithPeriod(d, "afternoon");
+            },
+          },
+          {
+            key: "cancel",
+            label: "Annuler",
+            variant: "outline",
+            onSelect: () => setPendingRestDate(null),
+          },
+        ]}
+      />
+      <ChoiceDialog
+        open={restConflict !== null && !moveTargetOpen}
+        onOpenChange={(o) => {
+          if (!o) setRestConflict(null);
+        }}
+        title="Ce jour contient déjà des activités"
+        description={
+          restConflict
+            ? `${restConflict.activities.length} activité(s) prévue(s) le ${formatDateISO(
+                restConflict.date
+              )}. Que souhaitez-vous faire pour marquer ce jour comme repos ?`
+            : undefined
+        }
+        actions={[
+          {
+            key: "move",
+            label: "Déplacer les activités vers un autre jour",
+            variant: "default",
+            onSelect: openMoveActivities,
+          },
+          {
+            key: "delete",
+            label: "Effacer les activités du jour",
+            variant: "destructive",
+            onSelect: handleDeleteAndRest,
+          },
+          {
+            key: "cancel",
+            label: "Annuler",
+            variant: "outline",
+            onSelect: () => setRestConflict(null),
+          },
+        ]}
+      />
+      <ChoiceDialog
+        open={moveTargetOpen}
+        onOpenChange={(o) => {
+          if (!o) setMoveTargetOpen(false);
+        }}
+        title="Déplacer les activités"
+        description="Choisissez la date de destination. Les horaires seront conservés."
+        actions={[
+          {
+            key: "confirm",
+            label: "Confirmer le déplacement",
+            variant: "default",
+            onSelect: handleMoveAndRest,
+            disabled: !moveTargetDate,
+          },
+          {
+            key: "back",
+            label: "Retour",
+            variant: "outline",
+            onSelect: () => setMoveTargetOpen(false),
+          },
+        ]}
+      >
+        <div className="space-y-2">
+          <Label htmlFor="move-target">Nouvelle date</Label>
+          <Input
+            id="move-target"
+            type="date"
+            value={moveTargetDate}
+            onChange={(e) => setMoveTargetDate(e.target.value)}
+          />
+        </div>
+      </ChoiceDialog>
+      <ChoiceDialog
+        open={applyConflictOpen}
+        onOpenChange={setApplyConflictOpen}
+        title="Appliquer la semaine type"
+        description="Certains jours de cette semaine contiennent déjà des activités. Comment souhaitez-vous procéder ?"
+        actions={[
+          {
+            key: "overwrite",
+            label: "Écraser les activités existantes",
+            description:
+              "Supprime toutes les activités de la semaine et applique la semaine type.",
+            variant: "destructive",
+            onSelect: async () => {
+              setApplyConflictOpen(false);
+              await applyDefaultWeek(startOfWeek(cursor), "overwrite");
+            },
+          },
+          {
+            key: "empty-only",
+            label: "Remplir uniquement les jours vides",
+            description:
+              "Conserve les activités existantes et complète les jours sans activité.",
+            onSelect: async () => {
+              setApplyConflictOpen(false);
+              await applyDefaultWeek(startOfWeek(cursor), "empty-only");
+            },
+          },
+          {
+            key: "cancel",
+            label: "Annuler",
+            variant: "outline",
+            onSelect: () => setApplyConflictOpen(false),
+          },
+        ]}
+      />
+      <ChoiceDialog
+        open={overload !== null}
+        onOpenChange={(o) => {
+          if (!o) setOverload(null);
+        }}
+        title="Limite journalière dépassée"
+        description={
+          overload
+            ? `Le ${formatDateISO(overload.date)} dépasse de ${overload.excessHours.toFixed(2)} h la limite contractuelle. Que souhaitez-vous faire ?`
+            : ""
+        }
+        actions={[
+          {
+            key: "reduce",
+            label: "Réduire l'activité",
+            description:
+              "Raccourcit la dernière activité saisie pour rester dans la limite.",
+            onSelect: () => reduceSavedActivity(),
+          },
+          {
+            key: "recup",
+            label: "Récupérer le lendemain",
+            description:
+              "Conserve les activités et ajoute des créneaux de récupération le jour suivant.",
+            onSelect: () => scheduleRecuperation(),
+          },
+          {
+            key: "recup-custom",
+            label: "Récupérer un autre jour",
+            description:
+              "Choisissez la date (et l'heure si souhaité) pour planifier la récupération.",
+            onSelect: () => openCustomRecup(),
+          },
+          {
+            key: "keep",
+            label: "Conserver tel quel",
+            variant: "outline",
+            onSelect: () => setOverload(null),
+          },
+        ]}
+      />
+      <ChoiceDialog
+        open={recupOverwrite !== null}
+        onOpenChange={(o) => {
+          if (!o) setRecupOverwrite(null);
+        }}
+        title="Aucun créneau libre disponible"
+        description={
+          recupOverwrite
+            ? `Il reste ${(recupOverwrite.remainingMs / 3600000).toFixed(2)} h à récupérer. Souhaitez-vous écraser les activités existantes du lendemain (hors pauses) ?`
+            : ""
+        }
+        actions={[
+          {
+            key: "overwrite",
+            label: "Écraser les activités (hors pauses)",
+            description:
+              "Remplace partiellement ou totalement les activités du jour suivant, en respectant les pauses.",
+            variant: "destructive",
+            onSelect: () => confirmRecupOverwrite(),
+          },
+          {
+            key: "cancel",
+            label: "Annuler",
+            variant: "outline",
+            onSelect: () => setRecupOverwrite(null),
+          },
+        ]}
+      />
+      <ChoiceDialog
+        open={pendingHolidayActivity !== null}
+        onOpenChange={(o) => {
+          if (!o) setPendingHolidayActivity(null);
+        }}
+        title="Jour férié"
+        description={
+          pendingHolidayActivity
+            ? `Le ${formatDateISO(pendingHolidayActivity.date)} est un jour férié (${pendingHolidayActivity.name}). Voulez-vous quand même y ajouter une activité ?`
+            : ""
+        }
+        actions={[
+          {
+            key: "confirm",
+            label: "Ajouter l'activité",
+            onSelect: () => confirmHolidayActivity(),
+          },
+          {
+            key: "cancel",
+            label: "Annuler",
+            variant: "outline",
+            onSelect: () => setPendingHolidayActivity(null),
+          },
+        ]}
+      />
+      <ChoiceDialog
+        open={pendingVacationActivity !== null}
+        onOpenChange={(o) => {
+          if (!o) setPendingVacationActivity(null);
+        }}
+        title="Jour de vacances"
+        description={
+          pendingVacationActivity
+            ? `Le ${formatDateISO(pendingVacationActivity.date)} est marqué comme vacances${pendingVacationActivity.label ? ` (${pendingVacationActivity.label})` : ""}. Voulez-vous quand même y ajouter une activité ?`
+            : ""
+        }
+        actions={[
+          {
+            key: "confirm",
+            label: "Ajouter l'activité",
+            onSelect: () => confirmVacationActivity(),
+          },
+          {
+            key: "cancel",
+            label: "Annuler",
+            variant: "outline",
+            onSelect: () => setPendingVacationActivity(null),
+          },
+        ]}
+      />
+      <ChoiceDialog
+        open={customRecup !== null}
+        onOpenChange={(o) => {
+          if (!o) setCustomRecup(null);
+        }}
+        title="Récupérer un autre jour"
+        description={
+          customRecup
+            ? `Choisissez la date${customRecupTime ? " et l'heure" : " (heure optionnelle)"} pour planifier ${(customRecup.excessMs / 3600000).toFixed(2)} h de récupération.`
+            : ""
+        }
+        actions={[
+          {
+            key: "confirm",
+            label: "Planifier la récupération",
+            onSelect: () => confirmCustomRecup(),
+            disabled: !customRecupDate,
+          },
+          {
+            key: "cancel",
+            label: "Annuler",
+            variant: "outline",
+            onSelect: () => setCustomRecup(null),
+          },
+        ]}
+      >
+        <div className="flex flex-col gap-3">
+          <div className="flex flex-col gap-1.5">
+            <Label htmlFor="custom-recup-date">Date</Label>
+            <Input
+              id="custom-recup-date"
+              type="date"
+              value={customRecupDate}
+              onChange={(e) => setCustomRecupDate(e.target.value)}
+            />
+          </div>
+          <div className="flex flex-col gap-1.5">
+            <Label htmlFor="custom-recup-time">
+              Heure de début{" "}
+              <span className="text-xs text-muted-foreground">
+                (optionnelle)
+              </span>
+            </Label>
+            <Input
+              id="custom-recup-time"
+              type="time"
+              value={customRecupTime}
+              onChange={(e) => setCustomRecupTime(e.target.value)}
+            />
+            <p className="text-xs text-muted-foreground">
+              Sans heure, la récupération sera placée automatiquement dans les
+              créneaux libres de la journée.
+            </p>
+          </div>
+        </div>
+      </ChoiceDialog>
     </div>
   );
 }
