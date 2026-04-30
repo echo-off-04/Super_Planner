@@ -1456,8 +1456,8 @@ export function Dashboard({ user }: Props) {
         description={
           restConflict
             ? `${restConflict.activities.length} activité(s) prévue(s) le ${formatDateISO(
-                restConflict.date
-              )}. Que souhaitez-vous faire pour marquer ce jour comme repos ?`
+              restConflict.date
+            )}. Que souhaitez-vous faire pour marquer ce jour comme repos ?`
             : undefined
         }
         actions={[

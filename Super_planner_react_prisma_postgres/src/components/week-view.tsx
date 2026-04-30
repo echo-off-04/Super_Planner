@@ -162,16 +162,16 @@ export function WeekView({
                     className={cn(
                       "px-1.5 text-[10px]",
                       isSick &&
-                        "border-rose-500/60 bg-rose-500/15 text-rose-900 dark:text-rose-200"
+                      "border-rose-500/60 bg-rose-500/15 text-rose-900 dark:text-rose-200"
                     )}
                   >
                     {rest.status === "validated"
                       ? (isSick ? "Maladie" : "Repos") +
-                        (rest.rest_period === "morning"
-                          ? " matin"
-                          : rest.rest_period === "afternoon"
-                            ? " ap.-m."
-                            : "")
+                      (rest.rest_period === "morning"
+                        ? " matin"
+                        : rest.rest_period === "afternoon"
+                          ? " ap.-m."
+                          : "")
                       : "Suggéré"}
                   </Badge>
                 )}

@@ -151,11 +151,11 @@ export function DayView({
                 <Moon className="mr-1 h-3 w-3" />
                 {rest.status === "validated"
                   ? (rest.kind === "sick" ? "Maladie" : "Repos") +
-                    (rest.rest_period === "morning"
-                      ? " matin"
-                      : rest.rest_period === "afternoon"
-                        ? " après-midi"
-                        : "")
+                  (rest.rest_period === "morning"
+                    ? " matin"
+                    : rest.rest_period === "afternoon"
+                      ? " après-midi"
+                      : "")
                   : "Suggéré"}
               </Badge>
             )}

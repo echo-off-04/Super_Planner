@@ -106,18 +106,18 @@ export function MonthView({
                 !isCurrentMonth && "bg-muted/20 text-muted-foreground",
                 (i + 1) % 7 === 0 && "border-r-0",
                 holidayName &&
-                  !hasIssue &&
-                  !vacationLabel &&
-                  "bg-amber-500/5 hover:bg-amber-500/10",
+                !hasIssue &&
+                !vacationLabel &&
+                "bg-amber-500/5 hover:bg-amber-500/10",
                 vacationLabel &&
-                  !hasIssue &&
-                  "bg-teal-500/15 hover:bg-teal-500/25 dark:bg-teal-400/10 dark:hover:bg-teal-400/20",
+                !hasIssue &&
+                "bg-teal-500/15 hover:bg-teal-500/25 dark:bg-teal-400/10 dark:hover:bg-teal-400/20",
                 isSick &&
-                  !hasIssue &&
-                  !vacationLabel &&
-                  "bg-rose-500/15 hover:bg-rose-500/25 dark:bg-rose-400/10 dark:hover:bg-rose-400/20",
+                !hasIssue &&
+                !vacationLabel &&
+                "bg-rose-500/15 hover:bg-rose-500/25 dark:bg-rose-400/10 dark:hover:bg-rose-400/20",
                 hasIssue &&
-                  "border-destructive/60 bg-destructive/5 hover:bg-destructive/10"
+                "border-destructive/60 bg-destructive/5 hover:bg-destructive/10"
               )}
               title={
                 [
@@ -200,7 +200,7 @@ export function MonthView({
                     className={cn(
                       "truncate rounded-sm px-1.5 py-0.5 text-[10px] font-medium",
                       a.activity_type === "pause" ||
-                      a.activity_type === "recuperation"
+                        a.activity_type === "recuperation"
                         ? "bg-green-500/20 dark:bg-green-400/20"
                         : "bg-blue-500/20 dark:bg-blue-400/20"
                     )}
