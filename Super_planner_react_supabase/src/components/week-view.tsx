@@ -1,5 +1,11 @@
-import { useMemo } from "react";
-import type { Activity, ContractSettings, RestDay } from "@/lib/supabase";
+import { Fragment, useMemo } from "react";
+import type {
+  Activity,
+  ContractSettings,
+  DefaultWeekSettings,
+  RestDay,
+} from "@/lib/supabase";
+import { parseHM } from "@/lib/supabase";
 import {
   DAY_SHORT,
   addDays,
@@ -22,6 +28,7 @@ interface Props {
   activities: Activity[];
   restDays: RestDay[];
   contract: ContractSettings | null;
+  defaultWeek: DefaultWeekSettings | null;
   holidays?: Map<string, string>;
   vacations?: Map<string, string>;
   onAddActivity: (date: Date) => void;
@@ -57,6 +64,7 @@ export function WeekView({
   activities,
   restDays,
   contract,
+  defaultWeek,
   holidays,
   vacations,
   onAddActivity,
@@ -80,8 +88,20 @@ export function WeekView({
     });
   }, [activities, weekStart]);
 
-  const maxDaily = contract?.daily_max_hours ?? 10;
+  const maxDaily = contract?.daily_max_hours ?? 8;
   const minRest = contract?.min_rest_hours ?? 11;
+  const morningStartMin = useMemo(
+    () => (defaultWeek ? parseHM(defaultWeek.morning_start) : 8 * 60),
+    [defaultWeek]
+  );
+  const afternoonStartMin = useMemo(
+    () => (defaultWeek ? parseHM(defaultWeek.afternoon_start) : 12 * 60),
+    [defaultWeek]
+  );
+  const afternoonEndMin = useMemo(
+    () => (defaultWeek ? parseHM(defaultWeek.afternoon_end) : 17 * 60),
+    [defaultWeek]
+  );
   const restMap = useMemo(() => {
     const m = new Map<string, RestDay>();
     for (const r of restDays) m.set(r.rest_date, r);
@@ -207,37 +227,91 @@ export function WeekView({
                 </div>
               )}
 
-              {dayActivities.map((a) => {
-                const meta = metaFor(a.activity_type);
-                const Icon = meta.icon;
-                return (
-                  <button
-                    key={a.id}
-                    onClick={() => onEditActivity(a)}
-                    className={cn(
-                      "group flex flex-col gap-0.5 rounded-md border px-2 py-1.5 text-left text-xs transition hover:shadow-sm",
-                      meta.cls
-                    )}
-                  >
-                    <div className="flex items-center gap-1.5 font-medium">
-                      <Icon className="h-3 w-3 shrink-0" />
-                      <span className="truncate">{a.title || meta.label}</span>
-                    </div>
-                    <div className="flex items-center gap-1 text-[11px] opacity-80">
-                      <span>
-                        {formatTime(new Date(a.start_time))} –{" "}
-                        {formatTime(new Date(a.end_time))}
-                      </span>
-                    </div>
-                    {a.location && (
-                      <div className="flex items-center gap-1 text-[11px] opacity-70">
-                        <MapPin className="h-3 w-3" />
-                        <span className="truncate">{a.location}</span>
-                      </div>
-                    )}
-                  </button>
-                );
-              })}
+              {(() => {
+                const inserted = {
+                  morning: false,
+                  afternoon: false,
+                  evening: false,
+                };
+                return dayActivities.map((a) => {
+                  const meta = metaFor(a.activity_type);
+                  const Icon = meta.icon;
+                  const s = new Date(a.start_time);
+                  const sMin = s.getHours() * 60 + s.getMinutes();
+                  const dividers: { key: string; label: string }[] = [];
+                  if (
+                    !inserted.morning &&
+                    sMin >= morningStartMin &&
+                    sMin < afternoonStartMin
+                  ) {
+                    dividers.push({ key: "morning", label: "Matin" });
+                    inserted.morning = true;
+                  }
+                  if (
+                    !inserted.afternoon &&
+                    sMin >= afternoonStartMin &&
+                    sMin < afternoonEndMin
+                  ) {
+                    dividers.push({ key: "afternoon", label: "Après-midi" });
+                    inserted.afternoon = true;
+                  }
+                  if (!inserted.evening && sMin >= afternoonEndMin) {
+                    dividers.push({ key: "evening", label: "Fin de journée" });
+                    inserted.evening = true;
+                  }
+                  return (
+                    <Fragment key={a.id}>
+                      {dividers.map((d) => (
+                        <div
+                          key={d.key}
+                          className="flex items-center gap-2 py-0.5"
+                        >
+                          <div className="h-px flex-1 bg-primary/40" />
+                          <span className="text-[9px] font-semibold uppercase tracking-wide text-primary">
+                            {d.label}
+                          </span>
+                          <div className="h-px flex-1 bg-primary/40" />
+                        </div>
+                      ))}
+                      <button
+                        onClick={() => onEditActivity(a)}
+                        className={cn(
+                          "group flex flex-col gap-0.5 rounded-md border px-2 py-1.5 text-left text-xs transition hover:shadow-sm",
+                          meta.cls
+                        )}
+                      >
+                        <div className="flex items-center gap-1.5 font-medium">
+                          <Icon className="h-3 w-3 shrink-0" />
+                          <span className="truncate">
+                            {a.title || meta.label}
+                          </span>
+                        </div>
+                        <div className="flex items-center gap-1 text-[11px] opacity-80">
+                          <span>
+                            {formatTime(new Date(a.start_time))} –{" "}
+                            {formatTime(new Date(a.end_time))}
+                            {(() => {
+                              const sd = new Date(a.start_time);
+                              const ed = new Date(a.end_time);
+                              return sd.getFullYear() !== ed.getFullYear() ||
+                                sd.getMonth() !== ed.getMonth() ||
+                                sd.getDate() !== ed.getDate()
+                                ? " (J+1)"
+                                : "";
+                            })()}
+                          </span>
+                        </div>
+                        {a.location && (
+                          <div className="flex items-center gap-1 text-[11px] opacity-70">
+                            <MapPin className="h-3 w-3" />
+                            <span className="truncate">{a.location}</span>
+                          </div>
+                        )}
+                      </button>
+                    </Fragment>
+                  );
+                });
+              })()}
             </div>
 
             <div className="flex flex-col gap-1 border-t p-1.5">

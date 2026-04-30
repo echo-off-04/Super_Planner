@@ -90,6 +90,32 @@ export interface RestRules {
   auto_suggest: boolean;
 }
 
+export interface ProtectedActivityType {
+  id: string;
+  user_id: string;
+  activity_type: string;
+  created_at: string;
+}
+
+export function buildProtectedTypeSet(
+  types: Pick<ProtectedActivityType, "activity_type">[]
+): Set<string> {
+  const set = new Set<string>();
+  for (const t of types) {
+    const v = (t.activity_type || "").trim();
+    if (v) set.add(v);
+  }
+  return set;
+}
+
+export function isActivityProtected(
+  activity: Pick<Activity, "activity_type">,
+  protectedSet: Set<string>
+): boolean {
+  if (protectedSet.size === 0) return false;
+  return protectedSet.has(activity.activity_type || "");
+}
+
 export interface Vacation {
   id: string;
   user_id: string;
@@ -183,7 +209,7 @@ export const DEFAULT_WEEK_FALLBACK: Omit<
   morning_start: "09:00",
   morning_end: "13:00",
   afternoon_start: "14:00",
-  afternoon_end: "16:00",
+  afternoon_end: "17:00",
   pause_start: "13:00",
   pause_end: "14:00",
   break_minutes: 60,

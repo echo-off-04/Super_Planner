@@ -41,7 +41,8 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Plus, Trash2, TriangleAlert } from "lucide-react";
-import { formatDayLong, formatDateISO, sameDay } from "@/lib/time";
+import { addDays, formatDayLong, formatDateISO, sameDay } from "@/lib/time";
+import { ChoiceDialog } from "./choice-dialog";
 
 interface Props {
   open: boolean;
@@ -100,6 +101,7 @@ export function ActivityDialog({
   const [customTypes, setCustomTypes] = useState<CustomActivityType[]>([]);
   const [newTypeLabel, setNewTypeLabel] = useState("");
   const [creatingType, setCreatingType] = useState(false);
+  const [pauseChoiceOpen, setPauseChoiceOpen] = useState(false);
 
   useEffect(() => {
     if (!open) return;
@@ -174,15 +176,22 @@ export function ActivityDialog({
     return [];
   }, [restEntry]);
 
-  function buildDateTime(timeStr: string): Date {
+  const startMin = parseHM(startTime);
+  const endMin = parseHM(endTime);
+
+  const morningStartMin = useMemo(
+    () => (defaultWeek ? parseHM(defaultWeek.morning_start) : 8 * 60),
+    [defaultWeek]
+  );
+
+  const crossesMidnight = endMin <= startMin && endMin < morningStartMin;
+
+  function buildDateTime(timeStr: string, nextDay = false): Date {
     const [h, m] = timeStr.split(":").map(Number);
-    const d = new Date(activeDate);
+    const d = nextDay ? addDays(activeDate, 1) : new Date(activeDate);
     d.setHours(h ?? 0, m ?? 0, 0, 0);
     return d;
   }
-
-  const startMin = parseHM(startTime);
-  const endMin = parseHM(endTime);
 
   const isPauseType = type === "pause";
 
@@ -206,6 +215,7 @@ export function ActivityDialog({
 
   const restConflict = useMemo(() => {
     if (!restEntry || isPauseType) return null;
+    if (crossesMidnight) return null;
     if (endMin <= startMin) return null;
     for (const r of restRanges) {
       const ov = overlapMinutes(startMin, endMin, r.startMin, r.endMin);
@@ -221,10 +231,11 @@ export function ActivityDialog({
       }
     }
     return null;
-  }, [restEntry, restRanges, startMin, endMin, isPauseType, availableHalf]);
+  }, [restEntry, restRanges, startMin, endMin, isPauseType, availableHalf, crossesMidnight]);
 
   const pauseConflict = useMemo(() => {
     if (isPauseType) return 0;
+    if (crossesMidnight) return 0;
     if (endMin <= startMin) return 0;
     const w = defaultWeek;
     if (!w) return 0;
@@ -232,19 +243,105 @@ export function ActivityDialog({
     const pEnd = parseHM(w.pause_end);
     if (pEnd <= pStart) return 0;
     return overlapMinutes(startMin, endMin, pStart, pEnd);
-  }, [defaultWeek, startMin, endMin, isPauseType]);
+  }, [defaultWeek, startMin, endMin, isPauseType, crossesMidnight]);
 
   const canSave =
     !!title &&
-    endMin > startMin &&
+    (endMin > startMin || crossesMidnight) &&
     !restConflict &&
     (!restEntry || restEntry.rest_period !== "full_day" || isPauseType);
 
-  async function handleSave() {
+  function handleSave() {
     if (!canSave) return;
+    if (pauseConflict > 0 && !isPauseType) {
+      setPauseChoiceOpen(true);
+      return;
+    }
+    void persistActivity({ splitAroundPause: false });
+  }
+
+  async function persistActivity({
+    splitAroundPause,
+  }: {
+    splitAroundPause: boolean;
+  }) {
     setSaving(true);
     const startDt = buildDateTime(startTime);
-    const endDt = buildDateTime(endTime);
+    const endDt = buildDateTime(endTime, crossesMidnight);
+
+    if (splitAroundPause && defaultWeek && !crossesMidnight) {
+      const pStartMin = parseHM(defaultWeek.pause_start);
+      const pEndMin = parseHM(defaultWeek.pause_end);
+      const pauseStart = new Date(activeDate);
+      pauseStart.setHours(Math.floor(pStartMin / 60), pStartMin % 60, 0, 0);
+      const pauseEnd = new Date(activeDate);
+      pauseEnd.setHours(Math.floor(pEndMin / 60), pEndMin % 60, 0, 0);
+      const segments: Array<{ start: Date; end: Date }> = [];
+      if (startMin < pStartMin) {
+        segments.push({ start: buildDateTime(startTime), end: pauseStart });
+      }
+      if (endMin > pEndMin) {
+        segments.push({ start: pauseEnd, end: buildDateTime(endTime) });
+      }
+      if (segments.length === 0) {
+        setSaving(false);
+        return;
+      }
+      const basePayload = {
+        user_id: userId,
+        title,
+        activity_type: type,
+        location,
+        notes,
+        source: activity?.source || "manual",
+        duration_kind: "custom" as DurationKind,
+        break_minutes: 0,
+      };
+      if (activity) {
+        await supabase.from("activities").delete().eq("id", activity.id);
+      }
+      const rows: Array<Record<string, unknown>> = segments.map((seg) => ({
+        ...basePayload,
+        start_time: seg.start.toISOString(),
+        end_time: seg.end.toISOString(),
+      }));
+
+      const dayStart = new Date(activeDate);
+      dayStart.setHours(0, 0, 0, 0);
+      const dayEndBound = new Date(activeDate);
+      dayEndBound.setHours(23, 59, 59, 999);
+      const { data: existingPause } = await supabase
+        .from("activities")
+        .select("id")
+        .eq("user_id", userId)
+        .eq("activity_type", "pause")
+        .gte("start_time", dayStart.toISOString())
+        .lte("start_time", dayEndBound.toISOString())
+        .limit(1);
+      const hasPause = ((existingPause as Array<{ id: string }>) ?? []).length > 0;
+      if (!hasPause) {
+        rows.push({
+          user_id: userId,
+          title: "Pause",
+          activity_type: "pause",
+          start_time: pauseStart.toISOString(),
+          end_time: pauseEnd.toISOString(),
+          location: "",
+          notes: "",
+          source: activity?.source || "manual",
+          duration_kind: "custom",
+          break_minutes: 0,
+        });
+      }
+
+      const { data } = await supabase.from("activities").insert(rows).select();
+      const savedId = (data as Array<{ id: string }> | null)?.[0]?.id;
+      setSaving(false);
+      onSaved({ savedDate: segments[0].start, savedId });
+      onOpenChange(false);
+      return;
+    }
+
     const breakMinutes = pauseOverlapMinutesForRange(
       startDt.toISOString(),
       endDt.toISOString(),
@@ -324,7 +421,7 @@ export function ActivityDialog({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="sm:max-w-lg">
+      <DialogContent className="sm:max-w-lg max-h-[90vh] overflow-y-auto">
         <DialogHeader>
           <DialogTitle>
             {activity ? "Modifier l'activité" : "Nouvelle activité"}
@@ -539,9 +636,15 @@ export function ActivityDialog({
               />
             </div>
           </div>
-          {pauseConflict > 0 && (
+          {crossesMidnight && (
             <p className="text-xs text-muted-foreground">
-              Pause de {pauseConflict} min comprise dans le créneau — décomptée automatiquement.
+              Fin le lendemain à {endTime} (avant {defaultWeek?.morning_start ?? "08:00"}).
+            </p>
+          )}
+          {pauseConflict > 0 && !isPauseType && (
+            <p className="text-xs text-muted-foreground">
+              Le créneau chevauche la pause ({pauseConflict} min) — un choix
+              vous sera proposé à l'enregistrement.
             </p>
           )}
           {restConflict && (
@@ -600,6 +703,44 @@ export function ActivityDialog({
           </div>
         </DialogFooter>
       </DialogContent>
+      <ChoiceDialog
+        open={pauseChoiceOpen}
+        onOpenChange={(o) => {
+          if (!o) setPauseChoiceOpen(false);
+        }}
+        title="Le créneau chevauche la pause"
+        description={`La pause (${defaultWeek?.pause_start ?? ""}–${
+          defaultWeek?.pause_end ?? ""
+        }) est incluse dans l'horaire saisi. Comment souhaitez-vous l'enregistrer ?`}
+        actions={[
+          {
+            key: "ignore",
+            label: "Ignorer la pause",
+            description:
+              "Enregistre une seule activité ; la durée de la pause est déduite du temps de travail.",
+            onSelect: () => {
+              setPauseChoiceOpen(false);
+              void persistActivity({ splitAroundPause: false });
+            },
+          },
+          {
+            key: "split",
+            label: "Diviser autour de la pause",
+            description:
+              "Crée une activité avant la pause et une autre après, la pause reste libre.",
+            onSelect: () => {
+              setPauseChoiceOpen(false);
+              void persistActivity({ splitAroundPause: true });
+            },
+          },
+          {
+            key: "cancel",
+            label: "Annuler",
+            variant: "outline",
+            onSelect: () => setPauseChoiceOpen(false),
+          },
+        ]}
+      />
     </Dialog>
   );
 }

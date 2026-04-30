@@ -136,28 +136,39 @@ function mergeIntervals(
 
 export function dailyWorkHours(dayActivities: Activity[]): number {
   if (dayActivities.length === 0) return 0;
+  const workLike = dayActivities.filter(
+    (a) => a.activity_type !== "pause" && a.activity_type !== "recuperation"
+  );
+  if (workLike.length === 0) return 0;
+  const presenceIntervals = dayActivities
+    .filter((a) => a.activity_type !== "recuperation")
+    .map((a) => ({
+      start: new Date(a.start_time).getTime(),
+      end: new Date(a.end_time).getTime(),
+    }));
+  const merged = mergeIntervals(presenceIntervals);
+  const rawMs = merged.reduce((s, i) => s + (i.end - i.start), 0);
+  return Math.max(0, rawMs / (1000 * 60 * 60));
+}
+
+export function dailyEffectiveWorkHours(dayActivities: Activity[]): number {
+  if (dayActivities.length === 0) return 0;
+  const workLike = dayActivities.filter(
+    (a) => a.activity_type !== "pause" && a.activity_type !== "recuperation"
+  );
+  if (workLike.length === 0) return 0;
   const merged = mergeIntervals(
-    dayActivities.map((a) => ({
+    workLike.map((a) => ({
       start: new Date(a.start_time).getTime(),
       end: new Date(a.end_time).getTime(),
     }))
   );
   const rawMs = merged.reduce((s, i) => s + (i.end - i.start), 0);
-  const recupMs = dayActivities
-    .filter((a) => a.activity_type === "recuperation")
-    .reduce(
-      (s, a) =>
-        s +
-        (new Date(a.end_time).getTime() - new Date(a.start_time).getTime()),
-      0
-    );
-  const breakMinutes = dayActivities.reduce(
+  const breakMinutes = workLike.reduce(
     (s, a) => s + (a.break_minutes ?? 0),
     0
   );
-  const hours =
-    (rawMs - recupMs) / (1000 * 60 * 60) - breakMinutes / 60;
-  return Math.max(0, hours);
+  return Math.max(0, rawMs / (1000 * 60 * 60) - breakMinutes / 60);
 }
 
 export function dailyRecuperationHours(dayActivities: Activity[]): number {
@@ -185,7 +196,7 @@ export function totalWorkHours(activities: Activity[]): number {
     byDay.set(key, list);
   }
   let total = 0;
-  for (const list of byDay.values()) total += dailyWorkHours(list);
+  for (const list of byDay.values()) total += dailyEffectiveWorkHours(list);
   return total;
 }
 

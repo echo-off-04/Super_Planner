@@ -4,7 +4,9 @@ import type {
   Activity,
   ContractSettings,
   DefaultWeekSettings,
+  CustomActivityType,
   Profile,
+  ProtectedActivityType,
   RestDay,
   RestPeriod,
   RestRules,
@@ -14,6 +16,7 @@ import type {
 import { ChoiceDialog } from "@/components/choice-dialog";
 import {
   TreePalm as Palmtree,
+  Plus,
   Thermometer,
   Trash2,
   X,
@@ -44,6 +47,7 @@ import {
   Select,
   SelectContent,
   SelectItem,
+  SelectSeparator,
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
@@ -85,6 +89,8 @@ export function SettingsDialog({
   );
   const [dwTitle, setDwTitle] = useState(DEFAULT_WEEK_FALLBACK.default_title);
   const [dwType, setDwType] = useState(DEFAULT_WEEK_FALLBACK.default_type);
+  const [dwCreatingType, setDwCreatingType] = useState(false);
+  const [dwNewTypeLabel, setDwNewTypeLabel] = useState("");
   const [dwMorningStart, setDwMorningStart] = useState(
     DEFAULT_WEEK_FALLBACK.morning_start
   );
@@ -137,12 +143,21 @@ export function SettingsDialog({
   } | null>(null);
   const [vacationIsoSet, setVacationIsoSet] = useState<Set<string>>(new Set());
 
+  const [protectedTypes, setProtectedTypes] = useState<
+    ProtectedActivityType[]
+  >([]);
+  const [customTypes, setCustomTypes] = useState<CustomActivityType[]>([]);
+  const [protectedTypeToAdd, setProtectedTypeToAdd] = useState<string>("");
+  const [creatingNewType, setCreatingNewType] = useState(false);
+  const [newTypeLabel, setNewTypeLabel] = useState("");
+  const [protectedBusy, setProtectedBusy] = useState(false);
+
   useEffect(() => {
     if (!open) return;
     setFullName(profile?.full_name ?? "");
     setRole((profile?.role as UserRole) ?? "logisticien");
     setWeeklyHours(contract?.weekly_hours ?? 35);
-    setDailyMax(contract?.daily_max_hours ?? 10);
+    setDailyMax(contract?.daily_max_hours ?? 8);
     setMinRest(contract?.min_rest_hours ?? 11);
     setOvertimeRate(contract?.overtime_rate ?? 1.25);
     setPreferredDays(rules?.preferred_rest_days ?? [1, 5]);
@@ -205,6 +220,25 @@ export function SettingsDialog({
       .then(({ data }) => {
         setSickRests((data as RestDay[]) ?? []);
       });
+    supabase
+      .from("protected_activity_types")
+      .select("*")
+      .eq("user_id", userId)
+      .order("activity_type", { ascending: true })
+      .then(({ data }) => {
+        setProtectedTypes((data as ProtectedActivityType[]) ?? []);
+      });
+    supabase
+      .from("activity_types")
+      .select("*")
+      .eq("user_id", userId)
+      .order("label")
+      .then(({ data }) => {
+        setCustomTypes((data as CustomActivityType[]) ?? []);
+      });
+    setProtectedTypeToAdd("");
+    setCreatingNewType(false);
+    setNewTypeLabel("");
     setNewVacStart("");
     setNewVacEnd("");
     setNewVacLabel("");
@@ -504,6 +538,133 @@ export function SettingsDialog({
     onSaved();
   }
 
+  function slugifyType(s: string): string {
+    return s
+      .toLowerCase()
+      .normalize("NFD")
+      .replace(/[\u0300-\u036f]/g, "")
+      .replace(/[^a-z0-9]+/g, "_")
+      .replace(/^_+|_+$/g, "");
+  }
+
+  async function addProtectedType(value: string) {
+    if (!value) return;
+    if (protectedTypes.some((p) => p.activity_type === value)) {
+      toast.error("Ce type est déjà protégé.");
+      return;
+    }
+    setProtectedBusy(true);
+    const { data, error } = await supabase
+      .from("protected_activity_types")
+      .insert({ user_id: userId, activity_type: value })
+      .select()
+      .maybeSingle();
+    setProtectedBusy(false);
+    if (error || !data) {
+      toast.error("Impossible d'ajouter le type protégé.");
+      return;
+    }
+    setProtectedTypes((prev) =>
+      [...prev, data as ProtectedActivityType].sort((a, b) =>
+        a.activity_type.localeCompare(b.activity_type)
+      )
+    );
+    setProtectedTypeToAdd("");
+    onSaved();
+  }
+
+  async function createAndProtectType() {
+    const label = newTypeLabel.trim();
+    if (!label) return;
+    const base = slugifyType(label) || `custom_${Date.now()}`;
+    const existingValues = new Set([
+      ...BUILTIN_ACTIVITY_TYPES.map((t) => t.value),
+      ...customTypes.map((t) => t.value),
+    ]);
+    let value = base;
+    let i = 1;
+    while (existingValues.has(value)) {
+      value = `${base}_${i++}`;
+    }
+    setProtectedBusy(true);
+    const { data: createdType, error: createErr } = await supabase
+      .from("activity_types")
+      .insert({ user_id: userId, value, label })
+      .select()
+      .maybeSingle();
+    if (createErr || !createdType) {
+      setProtectedBusy(false);
+      toast.error("Impossible de créer le type.");
+      return;
+    }
+    const created = createdType as CustomActivityType;
+    setCustomTypes((prev) => [...prev, created]);
+    const { data, error } = await supabase
+      .from("protected_activity_types")
+      .insert({ user_id: userId, activity_type: created.value })
+      .select()
+      .maybeSingle();
+    setProtectedBusy(false);
+    if (error || !data) {
+      toast.error("Type créé mais protection impossible.");
+      return;
+    }
+    setProtectedTypes((prev) =>
+      [...prev, data as ProtectedActivityType].sort((a, b) =>
+        a.activity_type.localeCompare(b.activity_type)
+      )
+    );
+    setCreatingNewType(false);
+    setNewTypeLabel("");
+    onSaved();
+  }
+
+  async function removeProtectedType(id: string) {
+    setProtectedBusy(true);
+    await supabase.from("protected_activity_types").delete().eq("id", id);
+    setProtectedBusy(false);
+    setProtectedTypes((prev) => prev.filter((p) => p.id !== id));
+    onSaved();
+  }
+
+  async function createDwType() {
+    const label = dwNewTypeLabel.trim();
+    if (!label) return;
+    const base = slugifyType(label) || `custom_${Date.now()}`;
+    const existingValues = new Set([
+      ...BUILTIN_ACTIVITY_TYPES.map((t) => t.value),
+      ...customTypes.map((t) => t.value),
+    ]);
+    let value = base;
+    let i = 1;
+    while (existingValues.has(value)) {
+      value = `${base}_${i++}`;
+    }
+    const { data, error } = await supabase
+      .from("activity_types")
+      .insert({ user_id: userId, value, label })
+      .select()
+      .maybeSingle();
+    if (error || !data) {
+      toast.error("Impossible de créer le type.");
+      return;
+    }
+    const created = data as CustomActivityType;
+    setCustomTypes((prev) => [...prev, created]);
+    setDwType(created.value);
+    setDwCreatingType(false);
+    setDwNewTypeLabel("");
+    onSaved();
+  }
+
+  function labelForType(value: string): string {
+    const builtin = BUILTIN_ACTIVITY_TYPES.find((t) => t.value === value);
+    if (builtin) return builtin.label;
+    const custom = customTypes.find((t) => t.value === value);
+    if (custom) return custom.label;
+    return value;
+  }
+
   function formatRange(v: Vacation): string {
     const start = new Date(v.start_date + "T00:00:00");
     const end = new Date(v.end_date + "T00:00:00");
@@ -616,7 +777,7 @@ export function SettingsDialog({
   return (
     <>
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="sm:max-w-lg">
+      <DialogContent className="sm:max-w-3xl max-h-[90vh] overflow-y-auto">
         <DialogHeader>
           <DialogTitle>Paramètres</DialogTitle>
           <DialogDescription>
@@ -624,13 +785,14 @@ export function SettingsDialog({
           </DialogDescription>
         </DialogHeader>
         <Tabs defaultValue="profile">
-          <TabsList className="grid w-full grid-cols-6">
+          <TabsList className="grid w-full grid-cols-7">
             <TabsTrigger value="profile">Profil</TabsTrigger>
             <TabsTrigger value="contract">Contrat</TabsTrigger>
             <TabsTrigger value="rules">Règles</TabsTrigger>
             <TabsTrigger value="default-week">Semaine type</TabsTrigger>
             <TabsTrigger value="vacations">Vacances</TabsTrigger>
             <TabsTrigger value="sickness">Maladie</TabsTrigger>
+            <TabsTrigger value="protected">Protégées</TabsTrigger>
           </TabsList>
           <TabsContent value="profile" className="space-y-4 pt-4">
             <div className="space-y-2">
@@ -775,18 +937,70 @@ export function SettingsDialog({
             </div>
             <div className="space-y-2">
               <Label htmlFor="dw-type">Type d'activité</Label>
-              <Select value={dwType} onValueChange={setDwType}>
-                <SelectTrigger id="dw-type">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  {allTypes.map((t) => (
-                    <SelectItem key={t.value} value={t.value}>
-                      {t.label}
+              {dwCreatingType ? (
+                <div className="flex gap-2">
+                  <Input
+                    autoFocus
+                    value={dwNewTypeLabel}
+                    onChange={(e) => setDwNewTypeLabel(e.target.value)}
+                    placeholder="Nom du nouveau type"
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") {
+                        e.preventDefault();
+                        createDwType();
+                      }
+                    }}
+                  />
+                  <Button
+                    type="button"
+                    size="sm"
+                    onClick={createDwType}
+                    disabled={!dwNewTypeLabel.trim()}
+                  >
+                    Ajouter
+                  </Button>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="sm"
+                    onClick={() => {
+                      setDwCreatingType(false);
+                      setDwNewTypeLabel("");
+                    }}
+                  >
+                    Annuler
+                  </Button>
+                </div>
+              ) : (
+                <Select
+                  value={dwType}
+                  onValueChange={(v) => {
+                    if (v === "__new__") {
+                      setDwCreatingType(true);
+                      return;
+                    }
+                    setDwType(v);
+                  }}
+                >
+                  <SelectTrigger id="dw-type">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {allTypes.map((t) => (
+                      <SelectItem key={t.value} value={t.value}>
+                        {t.label}
+                      </SelectItem>
+                    ))}
+                    <SelectSeparator />
+                    <SelectItem value="__new__">
+                      <span className="flex items-center gap-2">
+                        <Plus className="h-3.5 w-3.5" />
+                        Créer un type
+                      </span>
                     </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
+                  </SelectContent>
+                </Select>
+              )}
             </div>
             <div className="space-y-2">
               <Label>Jours de repos (semaine type)</Label>
@@ -1149,6 +1363,123 @@ export function SettingsDialog({
                 </ul>
               )}
             </div>
+          </TabsContent>
+          <TabsContent value="protected" className="space-y-4 pt-4">
+            <div className="space-y-2">
+              <p className="text-sm text-muted-foreground">
+                Les activités dont le type figure dans cette liste ne seront
+                jamais supprimées, déplacées ou écrasées par les opérations
+                automatiques (application de la semaine type, récupération
+                automatique, nettoyage de période de repos, etc.). Par défaut,
+                le type « Prestation » est protégé.
+              </p>
+            </div>
+            {creatingNewType ? (
+              <div className="flex gap-2">
+                <Input
+                  autoFocus
+                  value={newTypeLabel}
+                  onChange={(e) => setNewTypeLabel(e.target.value)}
+                  placeholder="Nom du nouveau type"
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") {
+                      e.preventDefault();
+                      void createAndProtectType();
+                    }
+                  }}
+                />
+                <Button
+                  type="button"
+                  onClick={createAndProtectType}
+                  disabled={protectedBusy || !newTypeLabel.trim()}
+                >
+                  Créer et protéger
+                </Button>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  onClick={() => {
+                    setCreatingNewType(false);
+                    setNewTypeLabel("");
+                  }}
+                >
+                  Annuler
+                </Button>
+              </div>
+            ) : (
+              <div className="flex gap-2">
+                <Select
+                  value={protectedTypeToAdd}
+                  onValueChange={(v) => {
+                    if (v === "__new__") {
+                      setCreatingNewType(true);
+                      return;
+                    }
+                    setProtectedTypeToAdd(v);
+                  }}
+                >
+                  <SelectTrigger className="flex-1">
+                    <SelectValue placeholder="Sélectionner un type à protéger" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {[
+                      ...BUILTIN_ACTIVITY_TYPES,
+                      ...customTypes.map((t) => ({
+                        value: t.value,
+                        label: t.label,
+                      })),
+                    ]
+                      .filter(
+                        (t) =>
+                          !protectedTypes.some(
+                            (p) => p.activity_type === t.value
+                          )
+                      )
+                      .map((t) => (
+                        <SelectItem key={t.value} value={t.value}>
+                          {t.label}
+                        </SelectItem>
+                      ))}
+                    <SelectItem value="__new__">Créer un type…</SelectItem>
+                  </SelectContent>
+                </Select>
+                <Button
+                  type="button"
+                  onClick={() => addProtectedType(protectedTypeToAdd)}
+                  disabled={protectedBusy || !protectedTypeToAdd}
+                >
+                  Ajouter
+                </Button>
+              </div>
+            )}
+            {protectedTypes.length === 0 ? (
+              <p className="text-sm text-muted-foreground">
+                Aucun type protégé pour le moment.
+              </p>
+            ) : (
+              <ul className="divide-y rounded-md border">
+                {protectedTypes.map((p) => (
+                  <li
+                    key={p.id}
+                    className="flex items-center justify-between gap-3 px-3 py-2"
+                  >
+                    <span className="text-sm">
+                      {labelForType(p.activity_type)}
+                    </span>
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="icon"
+                      onClick={() => removeProtectedType(p.id)}
+                      disabled={protectedBusy}
+                      aria-label="Retirer"
+                    >
+                      <Trash2 className="h-4 w-4" />
+                    </Button>
+                  </li>
+                ))}
+              </ul>
+            )}
           </TabsContent>
         </Tabs>
         <DialogFooter>

@@ -1,4 +1,5 @@
-import { formatDateISO } from "./time";
+import { addDays, formatDateISO } from "./time";
+import { isDateInVacations, type RestDay, type Vacation } from "./supabase";
 
 function easterSunday(year: number): Date {
   const a = year % 19;
@@ -124,4 +125,80 @@ export function countHolidayCreditHours(params: {
     }
   }
   return { hours, count };
+}
+
+export interface SpecialDayCredit {
+  holiday: { hours: number; count: number };
+  vacation: { hours: number; count: number };
+  sick: { hours: number; count: number };
+  totalHours: number;
+}
+
+export function countSpecialDayCredit(params: {
+  effectiveDailyHours: number;
+  restDays: number[];
+  holidays: Holiday[];
+  vacations: Vacation[];
+  sickRestDays: RestDay[];
+  rangeStart: Date;
+  rangeEnd: Date;
+}): SpecialDayCredit {
+  const startIso = formatDateISO(params.rangeStart);
+  const endIso = formatDateISO(params.rangeEnd);
+  const holidayIsoSet = new Set(
+    params.holidays
+      .filter((h) => h.date >= startIso && h.date <= endIso)
+      .map((h) => h.date)
+  );
+
+  let holidayHours = 0;
+  let holidayCount = 0;
+  for (const h of params.holidays) {
+    if (h.date < startIso || h.date > endIso) continue;
+    const d = new Date(h.date + "T00:00:00");
+    const wd = isoWeekday(d);
+    if (params.restDays.includes(wd)) continue;
+    holidayHours += params.effectiveDailyHours;
+    holidayCount += 1;
+  }
+
+  let vacationHours = 0;
+  let vacationCount = 0;
+  const start = new Date(params.rangeStart);
+  start.setHours(0, 0, 0, 0);
+  const end = new Date(params.rangeEnd);
+  end.setHours(0, 0, 0, 0);
+  for (let d = new Date(start); d.getTime() <= end.getTime(); d = addDays(d, 1)) {
+    const wd = isoWeekday(d);
+    if (params.restDays.includes(wd)) continue;
+    const iso = formatDateISO(d);
+    if (holidayIsoSet.has(iso)) continue;
+    if (isDateInVacations(iso, params.vacations)) {
+      vacationHours += params.effectiveDailyHours;
+      vacationCount += 1;
+    }
+  }
+
+  let sickHours = 0;
+  let sickCount = 0;
+  for (const r of params.sickRestDays) {
+    if (r.kind !== "sick") continue;
+    if (r.status !== "validated") continue;
+    if (r.rest_date < startIso || r.rest_date > endIso) continue;
+    const d = new Date(r.rest_date + "T00:00:00");
+    const wd = isoWeekday(d);
+    if (params.restDays.includes(wd)) continue;
+    if (holidayIsoSet.has(r.rest_date)) continue;
+    const factor =
+      r.rest_period === "morning" || r.rest_period === "afternoon" ? 0.5 : 1;
+    sickHours += params.effectiveDailyHours * factor;
+    sickCount += factor;
+  }
+
+  return {
+    holiday: { hours: holidayHours, count: holidayCount },
+    vacation: { hours: vacationHours, count: vacationCount },
+    sick: { hours: sickHours, count: sickCount },
+    totalHours: holidayHours + vacationHours + sickHours,
+  };
 }

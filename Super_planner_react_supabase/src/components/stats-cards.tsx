@@ -1,4 +1,5 @@
 import type { Activity, ContractSettings } from "@/lib/supabase";
+import type { SpecialDayCredit } from "@/lib/holidays";
 import { Card, CardContent } from "@/components/ui/card";
 import { Progress } from "@/components/ui/progress";
 import { formatHours, weekTotalHours } from "@/lib/time";
@@ -8,8 +9,9 @@ interface Props {
   activities: Activity[];
   contract: ContractSettings | null;
   restDaysCount: number;
-  view: "day" | "week" | "month";
-  holidayCredit?: { hours: number; count: number };
+  view: "day" | "week" | "month" | "custom";
+  specialCredit?: SpecialDayCredit;
+  customRange?: { start: Date; end: Date };
 }
 
 function weeksInMonth(reference: Date): number {
@@ -26,25 +28,21 @@ export function StatsCards({
   contract,
   restDaysCount,
   view,
-  holidayCredit,
+  specialCredit,
+  customRange,
 }: Props) {
   const worked = weekTotalHours(activities);
-  const holidayHours = holidayCredit?.hours ?? 0;
-  const holidayCount = holidayCredit?.count ?? 0;
-  const total = worked + holidayHours;
   const weeklyTarget = contract?.weekly_hours ?? 35;
-  const dailyTarget = contract?.daily_max_hours ?? 10;
+  const dailyTarget = contract?.daily_max_hours ?? 8;
 
   let hoursLabel = "Heures cette semaine";
   let target = weeklyTarget;
-  let overtime = Math.max(0, total - weeklyTarget);
   let activitiesHint = "Sur la semaine";
   let restHint = "Cette semaine";
 
   if (view === "day") {
     hoursLabel = "Heures ce jour";
     target = dailyTarget;
-    overtime = Math.max(0, total - dailyTarget);
     activitiesHint = "Ce jour";
     restHint = "Cette semaine";
   } else if (view === "month") {
@@ -54,25 +52,68 @@ export function StatsCards({
     const weeks = weeksInMonth(reference);
     hoursLabel = "Heures ce mois";
     target = weeklyTarget * weeks;
-    overtime = Math.max(0, total - target);
     activitiesHint = "Sur le mois";
     restHint = "Ce mois";
+  } else if (view === "custom" && customRange) {
+    const startMs = new Date(
+      customRange.start.getFullYear(),
+      customRange.start.getMonth(),
+      customRange.start.getDate()
+    ).getTime();
+    const endMs = new Date(
+      customRange.end.getFullYear(),
+      customRange.end.getMonth(),
+      customRange.end.getDate()
+    ).getTime();
+    const days = Math.max(
+      1,
+      Math.round((endMs - startMs) / (1000 * 60 * 60 * 24)) + 1
+    );
+    hoursLabel = "Heures sur la plage";
+    target = (weeklyTarget * days) / 7;
+    activitiesHint = `Sur ${days} jour${days > 1 ? "s" : ""}`;
+    restHint = `Sur ${days} jour${days > 1 ? "s" : ""}`;
   }
 
+  const creditTotal = specialCredit
+    ? specialCredit.holiday.hours +
+      specialCredit.vacation.hours +
+      specialCredit.sick.hours
+    : 0;
+  const adjustedTarget = Math.max(0, target - creditTotal);
+  const overtime = Math.max(0, worked - adjustedTarget);
   const pct =
-    target > 0 ? Math.min(100, Math.round((total / target) * 100)) : 0;
+    adjustedTarget > 0
+      ? Math.min(100, Math.round((worked / adjustedTarget) * 100))
+      : worked > 0
+        ? 100
+        : 0;
 
-  const holidayHint =
-    holidayHours > 0
-      ? ` · dont ${formatHours(holidayHours)} férié${holidayCount > 1 ? "s" : ""}`
-      : "";
+  const deductions: string[] = [];
+  if (specialCredit) {
+    if (specialCredit.holiday.hours > 0) {
+      deductions.push(
+        `${formatHours(specialCredit.holiday.hours)} férié${specialCredit.holiday.count > 1 ? "s" : ""}`
+      );
+    }
+    if (specialCredit.vacation.hours > 0) {
+      deductions.push(`${formatHours(specialCredit.vacation.hours)} vacances`);
+    }
+    if (specialCredit.sick.hours > 0) {
+      deductions.push(`${formatHours(specialCredit.sick.hours)} maladie`);
+    }
+  }
+  const hoursHint =
+    deductions.length > 0
+      ? `Objectif ${formatHours(adjustedTarget)} (${formatHours(target)} moins ${deductions.join(" · ")})`
+      : `Objectif ${formatHours(target)}`;
 
   const cards = [
     {
       icon: Clock,
       label: hoursLabel,
-      value: formatHours(total),
-      hint: `Objectif ${formatHours(target)}${holidayHint}`,
+      value: formatHours(worked),
+      hint: hoursHint,
       progress: pct,
     },
     {

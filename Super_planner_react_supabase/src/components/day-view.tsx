@@ -1,5 +1,11 @@
 import { useMemo } from "react";
-import type { Activity, ContractSettings, RestDay } from "@/lib/supabase";
+import type {
+  Activity,
+  ContractSettings,
+  DefaultWeekSettings,
+  RestDay,
+} from "@/lib/supabase";
+import { parseHM } from "@/lib/supabase";
 import {
   dailyRecuperationHours,
   dailyUsedHours,
@@ -20,6 +26,7 @@ interface Props {
   activities: Activity[];
   restDays: RestDay[];
   contract: ContractSettings | null;
+  defaultWeek: DefaultWeekSettings | null;
   previousDayActivities: Activity[];
   holidayName?: string | null;
   vacationLabel?: string | null;
@@ -58,6 +65,7 @@ export function DayView({
   activities,
   restDays,
   contract,
+  defaultWeek,
   previousDayActivities,
   holidayName,
   vacationLabel,
@@ -90,7 +98,7 @@ export function DayView({
   const recupHours = dailyRecuperationHours(dayActivities);
   const usedHours = dailyUsedHours(dayActivities);
 
-  const maxDaily = contract?.daily_max_hours ?? 10;
+  const maxDaily = contract?.daily_max_hours ?? 8;
   const minRest = contract?.min_rest_hours ?? 11;
   const overload = usedHours > maxDaily;
 
@@ -111,15 +119,36 @@ export function DayView({
   const today = new Date();
   const isToday = sameDay(date, today);
 
-  function getPosition(a: Activity) {
-    const s = new Date(a.start_time);
-    const e = new Date(a.end_time);
-    const startMin = s.getHours() * 60 + s.getMinutes();
-    const endMin = e.getHours() * 60 + e.getMinutes();
+  function positionFor(startMin: number, endMin: number) {
     const top = (startMin / (24 * 60)) * 100;
-    const height = Math.max(2, ((endMin - startMin) / (24 * 60)) * 100);
+    const height = Math.max(0.5, ((endMin - startMin) / (24 * 60)) * 100);
     return { top: `${top}%`, height: `${height}%` };
   }
+
+  const delimiters = useMemo(() => {
+    if (!defaultWeek) return [];
+    return [
+      {
+        key: "morning-start",
+        min: parseHM(defaultWeek.morning_start),
+        leftLabel: "Début matinée",
+      },
+      {
+        key: "afternoon-start",
+        min: parseHM(defaultWeek.afternoon_start),
+        leftLabel: "Début après-midi",
+      },
+      {
+        key: "afternoon-end",
+        min: parseHM(defaultWeek.afternoon_end),
+        leftLabel: "Fin après-midi",
+      },
+    ];
+  }, [defaultWeek]);
+
+  const afternoonEndMin = defaultWeek
+    ? parseHM(defaultWeek.afternoon_end)
+    : null;
 
   return (
     <div className="flex flex-col gap-4">
@@ -228,62 +257,103 @@ export function DayView({
         </div>
       )}
 
-      <div className="rounded-lg border bg-card">
-        <div className="relative">
-          <div
-            className="relative"
-            style={{ height: "720px" }}
-          >
-            {HOURS.map((h) => (
-              <div
-                key={h}
-                className="absolute left-0 right-0 flex items-start border-t border-border/60"
-                style={{ top: `${(h / 24) * 100}%` }}
-              >
-                <span className="w-14 shrink-0 px-2 py-1 text-[10px] font-medium text-muted-foreground">
-                  {String(h).padStart(2, "0")}:00
-                </span>
-              </div>
-            ))}
+      <div className="flex items-stretch gap-2" style={{ height: "720px" }}>
+        <div className="relative w-24 shrink-0">
+          {delimiters.map((d) => (
+            <div
+              key={d.key}
+              className="absolute right-0 flex -translate-y-1/2 items-center gap-1"
+              style={{ top: `${(d.min / (24 * 60)) * 100}%` }}
+            >
+              <span className="whitespace-nowrap rounded-sm border border-primary/40 bg-background px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-primary">
+                {d.leftLabel}
+              </span>
+            </div>
+          ))}
+        </div>
 
-            <div className="absolute inset-y-0 left-14 right-2">
-              {dayActivities.length === 0 && (
-                <div className="flex h-full items-center justify-center">
-                  <div className="flex flex-col items-center gap-2 text-center">
-                    <span className="text-sm text-muted-foreground">
-                      Aucune activité ce jour
-                    </span>
-                    <Button
-                      size="sm"
-                      variant="outline"
-                      onClick={() => onAddActivity(date)}
-                    >
-                      <Plus className="mr-1 h-4 w-4" /> Ajouter une activité
-                    </Button>
-                  </div>
+        <div className="relative flex-1 overflow-hidden rounded-lg border bg-card">
+          {HOURS.map((h) => (
+            <div
+              key={h}
+              className="absolute left-0 right-0 flex items-start border-t border-border/60"
+              style={{ top: `${(h / 24) * 100}%` }}
+            >
+              <span className="w-14 shrink-0 px-2 py-1 text-[10px] font-medium text-muted-foreground">
+                {String(h).padStart(2, "0")}:00
+              </span>
+            </div>
+          ))}
+
+          {delimiters.map((d) => (
+            <div
+              key={d.key}
+              className="pointer-events-none absolute left-0 right-0 border-t-2 border-primary"
+              style={{ top: `${(d.min / (24 * 60)) * 100}%` }}
+            />
+          ))}
+
+          <div className="absolute inset-y-0 left-14 right-2">
+            {dayActivities.length === 0 && (
+              <div className="flex h-full items-center justify-center">
+                <div className="flex flex-col items-center gap-2 text-center">
+                  <span className="text-sm text-muted-foreground">
+                    Aucune activité ce jour
+                  </span>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={() => onAddActivity(date)}
+                  >
+                    <Plus className="mr-1 h-4 w-4" /> Ajouter une activité
+                  </Button>
                 </div>
-              )}
+              </div>
+            )}
 
-              {dayActivities.map((a) => {
-                const meta = metaFor(a.activity_type);
-                const Icon = meta.icon;
-                const pos = getPosition(a);
-                const durationHours =
-                  (new Date(a.end_time).getTime() -
-                    new Date(a.start_time).getTime()) /
-                  (1000 * 60 * 60);
+            {dayActivities.flatMap((a) => {
+              const meta = metaFor(a.activity_type);
+              const Icon = meta.icon;
+              const s = new Date(a.start_time);
+              const e = new Date(a.end_time);
+              const crossesMidnight = !sameDay(s, e);
+              const aStart = s.getHours() * 60 + s.getMinutes();
+              const aEnd = crossesMidnight
+                ? 24 * 60
+                : e.getHours() * 60 + e.getMinutes();
+              const timeLabel = crossesMidnight
+                ? `${formatTime(s)} – ${formatTime(e)} (J+1)`
+                : `${formatTime(s)} – ${formatTime(e)}`;
+
+              const cuts: number[] = [aStart, aEnd];
+              if (
+                afternoonEndMin !== null &&
+                aStart < afternoonEndMin &&
+                aEnd > afternoonEndMin
+              ) {
+                cuts.splice(1, 0, afternoonEndMin);
+              }
+
+              return cuts.slice(0, -1).map((segStart, idx) => {
+                const segEnd = cuts[idx + 1];
+                const isOvertimeSegment =
+                  afternoonEndMin !== null && segStart >= afternoonEndMin;
+                const isFirstSegment = idx === 0;
+                const pos = positionFor(segStart, segEnd);
+                const durationHours = (segEnd - segStart) / 60;
                 const isCompact = durationHours < 1.5;
-                const timeLabel = `${formatTime(new Date(a.start_time))} – ${formatTime(new Date(a.end_time))}`;
                 return (
                   <button
-                    key={a.id}
+                    key={`${a.id}-${idx}`}
                     onClick={() => onEditActivity(a)}
                     className={cn(
                       "absolute left-0 right-0 overflow-hidden rounded-md border text-left text-xs shadow-sm transition hover:shadow-md",
                       isCompact
                         ? "flex items-center gap-2 px-2 py-1"
                         : "flex flex-col gap-0.5 px-2 py-1.5",
-                      meta.cls
+                      meta.cls,
+                      isOvertimeSegment &&
+                        "border-dashed border-destructive/60 bg-destructive/10"
                     )}
                     style={pos}
                   >
@@ -292,6 +362,7 @@ export function DayView({
                         <Icon className="h-3 w-3 shrink-0" />
                         <span className="truncate font-medium">
                           {a.title || meta.label}
+                          {isOvertimeSegment && " · extra"}
                         </span>
                         <span className="ml-auto shrink-0 text-[10px] opacity-80">
                           {timeLabel}
@@ -303,12 +374,13 @@ export function DayView({
                           <Icon className="h-3 w-3 shrink-0" />
                           <span className="truncate">
                             {a.title || meta.label}
+                            {isOvertimeSegment && " · extra"}
                           </span>
                         </div>
                         <div className="text-[11px] opacity-80">
-                          {timeLabel}
+                          {isFirstSegment ? timeLabel : `Suite · ${timeLabel}`}
                         </div>
-                        {a.location && (
+                        {isFirstSegment && a.location && (
                           <div className="flex items-center gap-1 text-[11px] opacity-70">
                             <MapPin className="h-3 w-3" />
                             <span className="truncate">{a.location}</span>
@@ -318,9 +390,28 @@ export function DayView({
                     )}
                   </button>
                 );
-              })}
-            </div>
+              });
+            })}
           </div>
+        </div>
+
+        <div className="relative w-20 shrink-0">
+          {delimiters.map((d) => {
+            const h = Math.floor(d.min / 60);
+            const m = d.min % 60;
+            const label = `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}`;
+            return (
+              <div
+                key={d.key}
+                className="absolute left-0 flex -translate-y-1/2 items-center"
+                style={{ top: `${(d.min / (24 * 60)) * 100}%` }}
+              >
+                <span className="whitespace-nowrap rounded-sm border border-primary/40 bg-background px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-primary">
+                  {label}
+                </span>
+              </div>
+            );
+          })}
         </div>
       </div>
     </div>

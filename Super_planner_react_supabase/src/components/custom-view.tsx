@@ -1,20 +1,27 @@
 import { useMemo } from "react";
 import type { Activity, ContractSettings, RestDay } from "@/lib/supabase";
 import {
-  DAY_SHORT,
   MONTH_LABELS,
   addDays,
   dailyUsedHours,
   dayRestGap,
   formatDateISO,
-  startOfWeek,
   dailyWorkHours,
 } from "@/lib/time";
-import { TriangleAlert } from "lucide-react";
+import { CalendarRange, TriangleAlert } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { Button } from "@/components/ui/button";
+import {
+  Popover,
+  PopoverContent,
+  PopoverTrigger,
+} from "@/components/ui/popover";
+import { Calendar } from "@/components/ui/calendar";
+import type { DateRange } from "react-day-picker";
 
 interface Props {
-  month: Date;
+  range: { start: Date; end: Date };
+  onChangeRange: (range: { start: Date; end: Date }) => void;
   activities: Activity[];
   restDays: RestDay[];
   contract: ContractSettings | null;
@@ -23,8 +30,9 @@ interface Props {
   onSelectDay: (date: Date) => void;
 }
 
-export function MonthView({
-  month,
+export function CustomView({
+  range,
+  onChangeRange,
   activities,
   restDays,
   contract,
@@ -34,11 +42,22 @@ export function MonthView({
 }: Props) {
   const maxDaily = contract?.daily_max_hours ?? 8;
   const minRest = contract?.min_rest_hours ?? 11;
-  const grid = useMemo(() => {
-    const firstOfMonth = new Date(month.getFullYear(), month.getMonth(), 1);
-    const start = startOfWeek(firstOfMonth);
-    return Array.from({ length: 42 }, (_, i) => addDays(start, i));
-  }, [month]);
+
+  const days = useMemo(() => {
+    const list: Date[] = [];
+    const start = new Date(range.start);
+    start.setHours(0, 0, 0, 0);
+    const end = new Date(range.end);
+    end.setHours(0, 0, 0, 0);
+    for (
+      let d = new Date(start);
+      d.getTime() <= end.getTime();
+      d.setDate(d.getDate() + 1)
+    ) {
+      list.push(new Date(d));
+    }
+    return list;
+  }, [range.start, range.end]);
 
   const activityMap = useMemo(() => {
     const m = new Map<string, Activity[]>();
@@ -57,32 +76,56 @@ export function MonthView({
   }, [restDays]);
 
   const today = new Date();
+  const todayIso = formatDateISO(today);
+
+  const selected: DateRange = { from: range.start, to: range.end };
+
+  const handleSelect = (next: DateRange | undefined) => {
+    if (next?.from && next?.to) {
+      onChangeRange({ start: next.from, end: next.to });
+    } else if (next?.from && !next?.to) {
+      onChangeRange({ start: next.from, end: next.from });
+    }
+  };
+
+  const formatLabel = (d: Date) =>
+    `${d.getDate()} ${MONTH_LABELS[d.getMonth()]} ${d.getFullYear()}`;
+
+  const lengthDays = days.length;
 
   return (
     <div className="rounded-lg border bg-card">
-      <div className="flex items-center justify-between border-b px-4 py-3">
-        <h3 className="text-base font-semibold">
-          {MONTH_LABELS[month.getMonth()]} {month.getFullYear()}
-        </h3>
+      <div className="flex flex-col gap-3 border-b px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
+        <div className="flex flex-col gap-0.5">
+          <h3 className="text-base font-semibold">Plage personnalisée</h3>
+          <p className="text-xs text-muted-foreground">
+            {formatLabel(range.start)} – {formatLabel(range.end)} ·{" "}
+            {lengthDays} jour{lengthDays > 1 ? "s" : ""}
+          </p>
+        </div>
+        <Popover>
+          <PopoverTrigger asChild>
+            <Button variant="outline" size="sm" className="h-9 gap-2">
+              <CalendarRange className="h-4 w-4" />
+              Choisir la plage
+            </Button>
+          </PopoverTrigger>
+          <PopoverContent className="w-auto p-0" align="end">
+            <Calendar
+              mode="range"
+              numberOfMonths={2}
+              defaultMonth={range.start}
+              selected={selected}
+              onSelect={handleSelect}
+              weekStartsOn={1}
+            />
+          </PopoverContent>
+        </Popover>
       </div>
-      <div className="grid grid-cols-7 border-b">
-        {DAY_SHORT.map((d) => (
-          <div
-            key={d}
-            className="px-2 py-2 text-center text-xs font-medium uppercase tracking-wide text-muted-foreground"
-          >
-            {d}
-          </div>
-        ))}
-      </div>
-      <div className="grid grid-cols-7">
-        {grid.map((date, i) => {
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
+        {days.map((date) => {
           const iso = formatDateISO(date);
-          const isCurrentMonth = date.getMonth() === month.getMonth();
-          const isToday =
-            date.getDate() === today.getDate() &&
-            date.getMonth() === today.getMonth() &&
-            date.getFullYear() === today.getFullYear();
+          const isToday = iso === todayIso;
           const dayActs = activityMap.get(iso) ?? [];
           const rest = restMap.get(iso);
           const hours = dailyWorkHours(dayActs);
@@ -99,12 +142,10 @@ export function MonthView({
 
           return (
             <button
-              key={i}
+              key={iso}
               onClick={() => onSelectDay(date)}
               className={cn(
-                "relative flex min-h-24 flex-col gap-1 border-b border-r p-2 text-left transition hover:bg-accent/40",
-                !isCurrentMonth && "bg-muted/20 text-muted-foreground",
-                (i + 1) % 7 === 0 && "border-r-0",
+                "flex min-h-28 flex-col gap-2 border-b border-r p-3 text-left transition hover:bg-accent/40",
                 holidayName &&
                   !hasIssue &&
                   !vacationLabel &&
@@ -119,42 +160,39 @@ export function MonthView({
                 hasIssue &&
                   "border-destructive/60 bg-destructive/5 hover:bg-destructive/10"
               )}
-              title={
-                [
-                  holidayName ? `Jour férié: ${holidayName}` : null,
-                  vacationLabel ? `Vacances: ${vacationLabel}` : null,
-                  isSick
-                    ? `Repos maladie${rest?.reason && rest.reason !== "Repos maladie" ? `: ${rest.reason}` : ""}`
-                    : null,
-                  overload ? `Surcharge: ${used.toFixed(2)} h / ${maxDaily} h` : null,
-                  insufficientRest
-                    ? `Repos insuffisant: ${(gap ?? 0).toFixed(2)} h (min ${minRest} h)`
-                    : null,
-                ]
-                  .filter(Boolean)
-                  .join(" · ") || undefined
-              }
             >
               <div className="flex items-center justify-between">
-                <span
-                  className={cn(
-                    "flex h-6 w-6 items-center justify-center rounded-full text-xs font-medium",
-                    isToday && "bg-primary text-primary-foreground"
-                  )}
-                >
-                  {date.getDate()}
-                </span>
+                <div className="flex items-center gap-2">
+                  <span
+                    className={cn(
+                      "flex h-7 min-w-7 items-center justify-center rounded-full px-2 text-xs font-semibold",
+                      isToday
+                        ? "bg-primary text-primary-foreground"
+                        : "bg-muted text-muted-foreground"
+                    )}
+                  >
+                    {date.getDate()}
+                  </span>
+                  <div className="flex flex-col">
+                    <span className="text-xs font-medium capitalize">
+                      {date.toLocaleDateString("fr-FR", { weekday: "short" })}
+                    </span>
+                    <span className="text-[10px] text-muted-foreground">
+                      {MONTH_LABELS[date.getMonth()].slice(0, 4)}.
+                    </span>
+                  </div>
+                </div>
                 <div className="flex items-center gap-1">
                   {hasIssue && (
-                    <TriangleAlert className="h-3 w-3 text-destructive" />
+                    <TriangleAlert className="h-3.5 w-3.5 text-destructive" />
                   )}
                   {overload ? (
-                    <span className="text-[10px] font-semibold text-destructive">
+                    <span className="text-[11px] font-semibold text-destructive">
                       {used.toFixed(1)}h / {maxDaily}h
                     </span>
                   ) : (
                     hours > 0 && (
-                      <span className="text-[10px] text-muted-foreground">
+                      <span className="text-[11px] text-muted-foreground">
                         {hours.toFixed(1)}h
                       </span>
                     )
@@ -169,7 +207,7 @@ export function MonthView({
                 )}
                 {vacationLabel && (
                   <span className="truncate rounded-sm border border-teal-500/40 bg-teal-500/15 px-1.5 py-0.5 text-[10px] font-medium text-teal-900 dark:text-teal-200">
-                    {vacationLabel || "Vacances"}
+                    {vacationLabel}
                   </span>
                 )}
                 {rest?.status === "validated" && (
@@ -189,12 +227,7 @@ export function MonthView({
                           : "")}
                   </span>
                 )}
-                {rest?.status === "suggested" && (
-                  <span className="rounded-sm border border-dashed px-1.5 py-0.5 text-[10px]">
-                    Suggéré
-                  </span>
-                )}
-                {dayActs.slice(0, 2).map((a) => (
+                {dayActs.slice(0, 3).map((a) => (
                   <span
                     key={a.id}
                     className={cn(
@@ -208,9 +241,9 @@ export function MonthView({
                     {a.title || a.activity_type}
                   </span>
                 ))}
-                {dayActs.length > 2 && (
+                {dayActs.length > 3 && (
                   <span className="text-[10px] text-muted-foreground">
-                    +{dayActs.length - 2}
+                    +{dayActs.length - 3}
                   </span>
                 )}
               </div>
