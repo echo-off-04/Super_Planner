@@ -1,0 +1,177 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum UserRole {
+  logisticien
+  animateur
+  manager
+}
+
+enum RestStatus {
+  suggested
+  validated
+  rejected
+}
+
+enum RestPeriod {
+  full_day
+  morning
+  afternoon
+}
+
+enum RestKind {
+  regular
+  sick
+}
+
+enum DurationKind {
+  full_day
+  morning
+  afternoon
+  custom
+}
+
+model User {
+  id                  String               @id @default(uuid()) @db.Uuid
+  email               String               @unique
+  passwordHash        String               @map("password_hash")
+  createdAt           DateTime             @default(now()) @map("created_at")
+  updatedAt           DateTime             @updatedAt @map("updated_at")
+  profile             Profile?
+  contractSettings    ContractSettings?
+  restRules           RestRules?
+  defaultWeekSettings DefaultWeekSettings?
+  activities          Activity[]
+  restDays            RestDay[]
+  vacations           Vacation[]
+  activityTypes       CustomActivityType[]
+
+  @@map("users")
+}
+
+model Profile {
+  id        String   @id @db.Uuid
+  user      User     @relation(fields: [id], references: [id], onDelete: Cascade)
+  fullName  String   @default("") @map("full_name")
+  role      UserRole @default(logisticien)
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@map("profiles")
+}
+
+model ContractSettings {
+  id            String   @id @default(uuid()) @db.Uuid
+  userId        String   @unique @map("user_id") @db.Uuid
+  user          User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  weeklyHours   Float    @default(35) @map("weekly_hours")
+  dailyMaxHours Float    @default(10) @map("daily_max_hours")
+  minRestHours  Float    @default(11) @map("min_rest_hours")
+  overtimeRate  Float    @default(1.25) @map("overtime_rate")
+  createdAt     DateTime @default(now()) @map("created_at")
+  updatedAt     DateTime @updatedAt @map("updated_at")
+
+  @@map("contract_settings")
+}
+
+model RestRules {
+  id                     String   @id @default(uuid()) @db.Uuid
+  userId                 String   @unique @map("user_id") @db.Uuid
+  user                   User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  preferredRestDays      Int[]    @default([1, 5]) @map("preferred_rest_days")
+  preferredTimeOfDay     String   @default("any") @map("preferred_time_of_day")
+  minConsecutiveRestDays Int      @default(1) @map("min_consecutive_rest_days")
+  autoSuggest            Boolean  @default(true) @map("auto_suggest")
+  createdAt              DateTime @default(now()) @map("created_at")
+  updatedAt              DateTime @updatedAt @map("updated_at")
+
+  @@map("rest_rules")
+}
+
+model DefaultWeekSettings {
+  id             String   @id @default(uuid()) @db.Uuid
+  userId         String   @unique @map("user_id") @db.Uuid
+  user           User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  restDays       Int[]    @default([6, 7]) @map("rest_days")
+  defaultTitle   String   @default("Travail") @map("default_title")
+  defaultType    String   @default("prestation") @map("default_type")
+  morningStart   String   @default("09:00") @map("morning_start")
+  morningEnd     String   @default("13:00") @map("morning_end")
+  afternoonStart String   @default("14:00") @map("afternoon_start")
+  afternoonEnd   String   @default("16:00") @map("afternoon_end")
+  pauseStart     String   @default("13:00") @map("pause_start")
+  pauseEnd       String   @default("14:00") @map("pause_end")
+  breakMinutes   Int      @default(60) @map("break_minutes")
+  createdAt      DateTime @default(now()) @map("created_at")
+  updatedAt      DateTime @updatedAt @map("updated_at")
+
+  @@map("default_week_settings")
+}
+
+model CustomActivityType {
+  id        String   @id @default(uuid()) @db.Uuid
+  userId    String   @map("user_id") @db.Uuid
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  value     String
+  label     String
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@unique([userId, value])
+  @@index([userId], map: "idx_activity_types_user")
+  @@map("activity_types")
+}
+
+model Activity {
+  id           String       @id @default(uuid()) @db.Uuid
+  userId       String       @map("user_id") @db.Uuid
+  user         User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  title        String       @default("")
+  activityType String       @default("prestation") @map("activity_type")
+  startTime    DateTime     @map("start_time")
+  endTime      DateTime     @map("end_time")
+  location     String       @default("")
+  notes        String       @default("")
+  source       String       @default("manual")
+  externalId   String       @default("") @map("external_id")
+  durationKind DurationKind @default(custom) @map("duration_kind")
+  breakMinutes Int          @default(0) @map("break_minutes")
+  createdAt    DateTime     @default(now()) @map("created_at")
+  updatedAt    DateTime     @updatedAt @map("updated_at")
+
+  @@index([userId, startTime], map: "idx_activities_user_time")
+  @@map("activities")
+}
+
+model RestDay {
+  id         String     @id @default(uuid()) @db.Uuid
+  userId     String     @map("user_id") @db.Uuid
+  user       User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  restDate   DateTime   @map("rest_date") @db.Date
+  status     RestStatus @default(suggested)
+  reason     String     @default("")
+  restPeriod RestPeriod @default(full_day) @map("rest_period")
+  kind       RestKind   @default(regular)
+  createdAt  DateTime   @default(now()) @map("created_at")
+
+  @@unique([userId, restDate])
+  @@index([userId, restDate], map: "idx_rest_days_user_date")
+  @@map("rest_days")
+}
+
+model Vacation {
+  id        String   @id @default(uuid()) @db.Uuid
+  userId    String   @map("user_id") @db.Uuid
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  startDate DateTime @map("start_date") @db.Date
+  endDate   DateTime @map("end_date") @db.Date
+  label     String   @default("")
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@index([userId, startDate, endDate], map: "vacations_user_range_idx")
+  @@map("vacations")
+}
